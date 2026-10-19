@@ -4,10 +4,15 @@ import { applyHostReady } from '@openchamber/sdk/ui';
 import type { LensError, LensSnapshot } from '../shared/types.ts';
 import { requestSnapshot } from './client.ts';
 import { renderPanel, type PanelTab } from './render.ts';
+import { PANEL_STYLE } from './styles.ts';
 
 const host = connectHost();
 const root = document.querySelector<HTMLElement>('#root');
 if (!root) throw new Error('Missing #root');
+
+const style = document.createElement('style');
+style.textContent = PANEL_STYLE;
+document.head.append(style);
 
 let mounted = false;
 let sessionId: string | null = null;

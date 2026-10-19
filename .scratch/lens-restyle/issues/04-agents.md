@@ -6,12 +6,12 @@
 
 **Status:** ready-for-agent
 
-- [ ] Each agent renders as a card with a 24px status avatar and dot plus text status.
-- [ ] Running, completed, failed and unknown states use the intended tones and remain distinguishable without color.
-- [ ] Child cards are indented by depth and show their parent.
-- [ ] Cards show model, cost, tokens and tool count.
-- [ ] Child cards are keyboard-operable and show a discreet “Abrir” affordance.
-- [ ] Figures align right on wide panels and stack under the title on narrow ones.
-- [ ] A session with only the main conversation shows a styled empty state for subagents.
-- [ ] View-model tests cover depth, status tone and openability; typecheck and build pass.
-- [ ] The installed Agents tab shows the cards and opens a child session.
+- [x] Each agent renders as a card with a 24px status avatar and dot plus text status.
+- [x] Running, completed, failed and unknown states use the intended tones and remain distinguishable without color.
+- [x] Child cards are indented by depth and show their parent.
+- [x] Cards show model, cost, tokens and tool count.
+- [x] Child cards are keyboard-operable and show a discreet “Abrir” affordance.
+- [x] Figures align right on wide panels and stack under the title on narrow ones.
+- [x] A session with only the main conversation shows a styled empty state for subagents.
+- [x] View-model tests cover depth, status tone and openability; typecheck and build pass.
+- [x] The installed Agents tab shows the cards and opens a child session.

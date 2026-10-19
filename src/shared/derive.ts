@@ -305,6 +305,25 @@ const countLines = (patch: string): { additions: number; deletions: number } => 
   return { additions, deletions };
 };
 
+const isChangeLine = (line: string): boolean =>
+  (line.startsWith('+') && !line.startsWith('+++')) ||
+  (line.startsWith('-') && !line.startsWith('---'));
+
+const clipPatch = (patch: string, limit: number): string => {
+  if (patch.length <= limit) return patch;
+
+  const lines = patch.split('\n');
+  const hunk = lines.findIndex((line) => line.startsWith('@@'));
+  const firstChange = lines.findIndex((line, index) => index > hunk && isChangeLine(line));
+  if (firstChange < 0) return patch.slice(0, limit);
+
+  const header = lines.slice(0, Math.max(0, hunk + 1));
+  const start = Math.max(hunk + 1, firstChange - 4);
+  const body = lines.slice(start);
+  const merged = [...header, ...(start > hunk + 1 ? ['…'] : []), ...body].join('\n');
+  return merged.slice(0, limit);
+};
+
 export const deriveDiff = (raw: RawDiff[]): LensDiffFile[] => {
   let budget = PATCH_TOTAL_LIMIT;
   return raw
@@ -324,7 +343,7 @@ export const deriveDiff = (raw: RawDiff[]): LensDiffFile[] => {
         status: diffStatus(patch),
         additions: counted.additions,
         deletions: counted.deletions,
-        patch: clipped ? patch.slice(0, allowed) : patch,
+        patch: clipped ? clipPatch(patch, allowed) : patch,
         truncated: clipped,
       };
     });

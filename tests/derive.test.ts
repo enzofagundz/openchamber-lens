@@ -102,6 +102,15 @@ describe('deriveDiff', () => {
     expect(file?.patch.length).toBe(20_000);
     expect(file?.truncated).toBe(true);
   });
+
+  test('keeps the first change visible when the unchanged prefix is huge', () => {
+    const prefix = Array.from({ length: 4_000 }, (_, index) => ` context ${index}`).join('\n');
+    const patch = `diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n${prefix}\n+linha nova\n`;
+    const [file] = deriveDiff([{ file: 'a.ts', patch }]);
+    expect(file?.truncated).toBe(true);
+    expect(file?.patch).toContain('+linha nova');
+    expect(file?.additions).toBe(1);
+  });
 });
 
 describe('deriveRecentFiles', () => {

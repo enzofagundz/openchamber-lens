@@ -6,11 +6,11 @@
 
 **Status:** ready-for-agent
 
-- [ ] A shared style source defines semantic tokens (surface, border, text, muted, accent, success, warning, danger, mono, radius) from host theme variables.
-- [ ] Header shows session title, agent, model and status; status has a dot plus text.
-- [ ] Tabs are 28px pills with 6px gaps, horizontal scroll and no page-level horizontal scroll.
-- [ ] The active tab is visually distinct without relying on color alone.
-- [ ] Agents, Turns and Diffs show count badges; Overview has no count.
-- [ ] Light and dark host themes both have readable hierarchy and contrast.
-- [ ] View-model tests cover the tab counts and active state; typecheck and build pass.
-- [ ] The installed panel demonstrates the new header and tabs in OpenChamber.
+- [x] A shared style source defines semantic tokens (surface, border, text, muted, accent, success, warning, danger, mono, radius) from host theme variables.
+- [x] Header shows session title, agent, model and status; status has a dot plus text.
+- [x] Tabs are 28px pills with 6px gaps, horizontal scroll and no page-level horizontal scroll.
+- [x] The active tab is visually distinct without relying on color alone.
+- [x] Agents, Turns and Diffs show count badges; Overview has no count.
+- [x] Light and dark host themes both have readable hierarchy and contrast.
+- [x] View-model tests cover the tab counts and active state; typecheck and build pass.
+- [x] The installed panel demonstrates the new header and tabs in OpenChamber.

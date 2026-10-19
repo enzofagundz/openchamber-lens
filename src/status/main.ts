@@ -5,40 +5,14 @@ import { strings } from '../shared/strings.ts';
 import type { LensStrip } from '../shared/types.ts';
 import { stripModel } from '../shared/view.ts';
 import { failureOf, requestStrip, type Failure } from '../panel/client.ts';
+import { STATUS_STYLE } from '../panel/styles.ts';
 
 const host = connectHost();
 const root = document.querySelector<HTMLElement>('#root');
 if (!root) throw new Error('Lens: missing #root');
 
 const style = document.createElement('style');
-style.textContent = `
-  #root {
-    box-sizing: border-box;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    height: 100%;
-    padding: 8px 10px;
-    color: var(--oc-fg, #ddd);
-    background: transparent;
-    font-family: var(--oc-font, system-ui, sans-serif);
-    font-size: 11px;
-  }
-  #root .strip-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
-  #root .strip-title { font-weight: 700; font-size: 11px; letter-spacing: .01em; white-space: nowrap; }
-  #root .strip-session { color: var(--oc-muted, #999); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-  #root .strip-status { color: var(--oc-muted, #999); font-size: 10px; white-space: nowrap; }
-  #root .strip-pills { display: flex; flex-wrap: wrap; gap: 4px 7px; align-items: baseline; }
-  #root .strip-pill { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
-  #root .strip-pill .label { color: var(--oc-muted, #999); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
-  #root .strip-pill .value { font-weight: 650; font-variant-numeric: tabular-nums; }
-  #root .strip-pill .value.normal { color: var(--oc-primary-text, #2563eb); }
-  #root .strip-pill .value.warning { color: var(--oc-warning-text, #b45309); }
-  #root .strip-pill .value.danger { color: var(--oc-error-text, #b91c1c); }
-  #root .strip-pill .value.muted { color: var(--oc-fg, inherit); }
-  #root .strip-error { color: var(--oc-error-text, #b91c1c); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #root .strip-empty { color: var(--oc-muted, #999); font-size: 10px; }
-`;
+style.textContent = STATUS_STYLE;
 document.head.append(style);
 
 let sessionId: string | null = null;
@@ -54,45 +28,46 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, t
   return node;
 };
 
-const statusText = (status: string): string =>
-  strings.status[status as keyof typeof strings.status] ?? strings.labels.unknown;
+const statusTone = (status: string): 'normal' | 'warning' | 'danger' | 'muted' =>
+  status === 'running' ? 'normal' : status === 'failed' ? 'danger' : 'muted';
 
-const pill = (label: string, value: string, tone = 'muted'): HTMLElement => {
+const pill = (label: string, value: string, tone = 'muted', title?: string): HTMLElement => {
   const node = el('span', 'strip-pill');
   node.append(el('span', 'label', label), el('span', `value ${tone}`, value));
+  if (title) node.title = title;
   return node;
 };
 
 const paint = (): void => {
   root.replaceChildren();
-  const head = el('div', 'strip-head');
 
   if (!sessionId) {
-    head.append(el('span', 'strip-empty', strings.empty.noSession));
-    root.append(head);
+    root.append(el('div', 'strip-empty', strings.empty.noSession));
     return;
   }
 
   if (!strip) {
-    head.append(el('span', 'strip-empty', error ? 'sem dados' : 'lendo…'));
-    root.append(head);
+    root.append(el('div', 'strip-empty', error ? 'Sem dados do serviço.' : 'Lendo sessão…'));
     if (error) root.append(el('div', 'strip-error', error.message));
     return;
   }
 
   const model = stripModel(strip);
-  head.append(
-    el('span', 'strip-session', strip.title),
-    el('span', 'strip-status', model.status),
-  );
+  const head = el('div', 'strip-head');
+  const title = el('span', 'strip-session', strip.title);
+  const state = el('span', 'strip-status');
+  state.append(el('span', `status-dot ${statusTone(strip.status)}`), el('span', undefined, model.status));
+  head.append(title, state);
 
   const pills = el('div', 'strip-pills');
+  const modelPill = pill(strings.labels.model, model.model);
+  modelPill.classList.add('strip-model');
   pills.append(
-    pill(strings.labels.context, model.context, model.tone === 'warning' || model.tone === 'danger' ? model.tone : 'muted'),
+    pill(strings.labels.context, model.context, model.tone, model.contextHint),
     pill(strings.labels.cost, model.cost),
     pill('agentes', model.running),
     pill('arquivos', model.files),
-    pill(strings.labels.model, model.model),
+    modelPill,
   );
 
   root.append(head, pills);

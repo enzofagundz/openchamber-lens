@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { buildSnapshot, buildStrip } from '../src/shared/derive.ts';
 import { formatAge, formatDuration, formatPercent, formatTokens, formatUsd } from '../src/shared/format.ts';
-import { agentRows, diffRows, overviewModel, stripModel, turnRows } from '../src/shared/view.ts';
+import { agentRows, diffRows, overviewModel, stripModel, tabCounts, turnRows } from '../src/shared/view.ts';
 import { errorText, strings } from '../src/shared/strings.ts';
 import { active, childMessages, childSession, diff, grandchildSession, models, rootMessages, rootSession } from './fixtures.ts';
 
@@ -40,6 +40,10 @@ describe('formatters', () => {
 });
 
 describe('view models', () => {
+  test('tab counts exclude the main conversation', () => {
+    expect(tabCounts(snapshot)).toEqual({ agents: 2, turns: 2, diffs: 3 });
+  });
+
   test('overview exposes context, cost, tokens and last turn', () => {
     const model = overviewModel(snapshot);
     expect(model.title).toBe('Sessão de teste');
@@ -50,7 +54,7 @@ describe('view models', () => {
     expect(model.recentFiles[0]?.action).toBe('editado');
   });
 
-  test('agent rows keep depth and openability', () => {
+  test('agent rows keep depth, parent and openability', () => {
     const rows = agentRows(snapshot);
     expect(rows.map((row) => [row.title, row.depth, row.canOpen])).toEqual([
       ['Sessão de teste', 0, false],
@@ -58,14 +62,20 @@ describe('view models', () => {
       ['Detalhe', 2, true],
     ]);
     expect(rows[1]?.status).toBe('rodando');
+    expect(rows[1]?.parentTitle).toBe('Sessão de teste');
+    expect(rows[2]?.parentTitle).toBe('Investigar');
   });
 
-  test('turn rows mark running and failures', () => {
+  test('turn rows keep metadata as separate items', () => {
     const rows = turnRows(snapshot);
     expect(rows).toHaveLength(2);
     expect(rows[0]?.failures).toBe('1 falha');
     expect(rows[1]?.running).toBe(true);
     expect(rows[1]?.agents).toBe(2);
+    expect(rows[0]?.meta.map((item) => item.key)).toEqual(['duration', 'cost', 'tools', 'failures']);
+    expect(rows[0]?.meta.map((item) => item.text)).toEqual(['0s', 'US$ 0,1000', '2 ferramentas', '1 falha']);
+    expect(rows[0]?.meta.find((item) => item.key === 'failures')?.tone).toBe('warning');
+    expect(rows[1]?.meta.find((item) => item.key === 'agents')?.text).toBe('2 agentes');
   });
 
   test('diff rows translate status and keep counts', () => {

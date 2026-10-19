@@ -34,6 +34,7 @@
     "build": "bun run scripts/build.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "visual:smoke": "node scripts/visual-smoke.cjs",
     "check": "bun run typecheck && bun test && bun run build",
     "dev:panel": "bun run scripts/build.ts"
   },

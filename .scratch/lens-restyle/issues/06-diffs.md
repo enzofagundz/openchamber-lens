@@ -6,12 +6,12 @@
 
 **Status:** ready-for-agent
 
-- [ ] File rows show monospace path, status badge and colored addition/deletion counts.
-- [ ] New, modified, deleted and unknown files have distinct labels.
-- [ ] Expanded patches render as individual lines, not one raw preformatted block.
-- [ ] Addition/deletion lines have tinted backgrounds and preserve whitespace.
-- [ ] Hunk headers are visually distinct from code lines.
-- [ ] The patch scrolls internally and keeps the truncation notice.
-- [ ] A session with no diff shows a styled empty card.
-- [ ] View-model tests cover status labels and counts; typecheck and build pass.
-- [ ] The installed Diffs tab expands a file and reads like a code review.
+- [x] File rows show monospace path, status badge and colored addition/deletion counts.
+- [x] New, modified, deleted and unknown files have distinct labels.
+- [x] Expanded patches render as individual lines, not one raw preformatted block.
+- [x] Addition/deletion lines have tinted backgrounds and preserve whitespace.
+- [x] Hunk headers are visually distinct from code lines.
+- [x] The patch scrolls internally and keeps the truncation notice.
+- [x] A session with no diff shows a styled empty card.
+- [x] View-model tests cover status labels and counts; typecheck and build pass.
+- [x] The installed Diffs tab expands a file and reads like a code review.

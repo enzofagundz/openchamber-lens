@@ -19,6 +19,18 @@ export type Metric = {
   tone: Tone;
 };
 
+export type TabCounts = {
+  agents: number;
+  turns: number;
+  diffs: number;
+};
+
+export type TurnMeta = {
+  key: string;
+  text: string;
+  tone: Tone;
+};
+
 export type OverviewModel = {
   title: string;
   subtitle: string;
@@ -33,6 +45,7 @@ export type OverviewModel = {
 export type AgentRow = {
   id: string;
   title: string;
+  parentTitle: string | null;
   depth: number;
   isMain: boolean;
   model: string;
@@ -53,6 +66,7 @@ export type TurnRow = {
   failures: string;
   running: boolean;
   agents: number;
+  meta: TurnMeta[];
   tone: Tone;
 };
 
@@ -95,16 +109,48 @@ const contextTone = (percent: number | null): Tone => {
   return 'normal';
 };
 
-const turnRow = (turn: LensTurn): TurnRow => ({
-  index: turn.index,
-  request: truncate(turn.request || `Turno ${turn.index}`, 120),
-  duration: formatDuration(turn.durationMs),
-  cost: formatUsd(turn.cost),
-  tools: `${turn.toolCalls} ${turn.toolCalls === 1 ? 'ferramenta' : 'ferramentas'}`,
-  failures: turn.failures > 0 ? `${turn.failures} ${turn.failures === 1 ? 'falha' : 'falhas'}` : 'sem falhas',
-  running: turn.running,
-  agents: turn.agents.length,
-  tone: turn.failures > 0 ? 'warning' : turn.running ? 'normal' : 'muted',
+const turnRow = (turn: LensTurn): TurnRow => {
+  const meta: TurnMeta[] = [
+    { key: 'duration', text: formatDuration(turn.durationMs), tone: 'muted' },
+    { key: 'cost', text: formatUsd(turn.cost), tone: 'muted' },
+    {
+      key: 'tools',
+      text: `${turn.toolCalls} ${turn.toolCalls === 1 ? 'ferramenta' : 'ferramentas'}`,
+      tone: 'muted',
+    },
+    {
+      key: 'failures',
+      text: turn.failures > 0 ? `${turn.failures} ${turn.failures === 1 ? 'falha' : 'falhas'}` : 'sem falhas',
+      tone: turn.failures > 0 ? 'warning' : 'muted',
+    },
+  ];
+
+  if (turn.agents.length > 0) {
+    meta.push({
+      key: 'agents',
+      text: `${turn.agents.length} ${turn.agents.length === 1 ? 'agente' : 'agentes'}`,
+      tone: 'muted',
+    });
+  }
+
+  return {
+    index: turn.index,
+    request: truncate(turn.request || `Turno ${turn.index}`, 120),
+    duration: formatDuration(turn.durationMs),
+    cost: formatUsd(turn.cost),
+    tools: `${turn.toolCalls} ${turn.toolCalls === 1 ? 'ferramenta' : 'ferramentas'}`,
+    failures: turn.failures > 0 ? `${turn.failures} ${turn.failures === 1 ? 'falha' : 'falhas'}` : 'sem falhas',
+    running: turn.running,
+    agents: turn.agents.length,
+    meta,
+    tone: turn.failures > 0 ? 'warning' : turn.running ? 'normal' : 'muted',
+  };
+};
+
+export const tabCounts = (snapshot: LensSnapshot): TabCounts => ({
+  agents: snapshot.agents.filter((agent) => !agent.isMain).length,
+  turns: snapshot.turns.length,
+  diffs: snapshot.diff.length,
 });
 
 export const overviewModel = (snapshot: LensSnapshot): OverviewModel => {
@@ -170,21 +216,27 @@ export const overviewModel = (snapshot: LensSnapshot): OverviewModel => {
 };
 
 export const agentRows = (snapshot: LensSnapshot): AgentRow[] =>
-  snapshot.agents.map((agent) => ({
-    id: agent.id,
-    title: agent.title,
-    depth: agent.depth,
-    isMain: agent.isMain,
-    model: agent.model,
-    status: statusText(agent.status),
-    tone: statusTone(agent.status),
-    cost: formatUsd(agent.cost),
-    tokens: formatTokens(
-      agent.tokens.input + agent.tokens.output + agent.tokens.reasoning + agent.tokens.cacheRead,
-    ),
-    tools: `${agent.toolCalls}`,
-    canOpen: !agent.isMain,
-  }));
+  snapshot.agents.map((agent) => {
+    const parent = agent.parentId
+      ? snapshot.agents.find((candidate) => candidate.id === agent.parentId)
+      : null;
+    return {
+      id: agent.id,
+      title: agent.title,
+      parentTitle: parent?.title ?? null,
+      depth: agent.depth,
+      isMain: agent.isMain,
+      model: agent.model,
+      status: statusText(agent.status),
+      tone: statusTone(agent.status),
+      cost: formatUsd(agent.cost),
+      tokens: formatTokens(
+        agent.tokens.input + agent.tokens.output + agent.tokens.reasoning + agent.tokens.cacheRead,
+      ),
+      tools: `${agent.toolCalls}`,
+      canOpen: !agent.isMain,
+    };
+  });
 
 export const turnRows = (snapshot: LensSnapshot): TurnRow[] => snapshot.turns.map(turnRow);
 

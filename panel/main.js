@@ -1855,7 +1855,8 @@ ${GUEST_UI_LOOK_CSS}`;
     },
     labels: {
       context: "Contexto",
-      cost: "Custo da sessão",
+      cost: "Custo",
+      costSession: "Custo da sessão",
       tokens: "Tokens",
       input: "Entrada",
       output: "Saída",
@@ -1877,8 +1878,19 @@ ${GUEST_UI_LOOK_CSS}`;
       unknown: "—",
       agentTree: "Quem chamou quem",
       openSession: "Abrir sessão",
+      open: "Abrir",
+      parent: "pai",
+      start: "Início",
       patchTruncated: "Patch truncado para manter o painel rápido.",
       runningTurn: "Em andamento"
+    },
+    sections: {
+      lastTurn: "Último turno",
+      recentFiles: "Arquivos recentes",
+      agents: "Subagentes",
+      turns: "Turnos",
+      diffs: "Arquivos alterados",
+      tokens: "Tokens"
     },
     status: {
       running: "rodando",
@@ -1950,16 +1962,45 @@ ${GUEST_UI_LOOK_CSS}`;
       return "warning";
     return "normal";
   };
-  var turnRow = (turn) => ({
-    index: turn.index,
-    request: truncate(turn.request || `Turno ${turn.index}`, 120),
-    duration: formatDuration(turn.durationMs),
-    cost: formatUsd(turn.cost),
-    tools: `${turn.toolCalls} ${turn.toolCalls === 1 ? "ferramenta" : "ferramentas"}`,
-    failures: turn.failures > 0 ? `${turn.failures} ${turn.failures === 1 ? "falha" : "falhas"}` : "sem falhas",
-    running: turn.running,
-    agents: turn.agents.length,
-    tone: turn.failures > 0 ? "warning" : turn.running ? "normal" : "muted"
+  var turnRow = (turn) => {
+    const meta = [
+      { key: "duration", text: formatDuration(turn.durationMs), tone: "muted" },
+      { key: "cost", text: formatUsd(turn.cost), tone: "muted" },
+      {
+        key: "tools",
+        text: `${turn.toolCalls} ${turn.toolCalls === 1 ? "ferramenta" : "ferramentas"}`,
+        tone: "muted"
+      },
+      {
+        key: "failures",
+        text: turn.failures > 0 ? `${turn.failures} ${turn.failures === 1 ? "falha" : "falhas"}` : "sem falhas",
+        tone: turn.failures > 0 ? "warning" : "muted"
+      }
+    ];
+    if (turn.agents.length > 0) {
+      meta.push({
+        key: "agents",
+        text: `${turn.agents.length} ${turn.agents.length === 1 ? "agente" : "agentes"}`,
+        tone: "muted"
+      });
+    }
+    return {
+      index: turn.index,
+      request: truncate(turn.request || `Turno ${turn.index}`, 120),
+      duration: formatDuration(turn.durationMs),
+      cost: formatUsd(turn.cost),
+      tools: `${turn.toolCalls} ${turn.toolCalls === 1 ? "ferramenta" : "ferramentas"}`,
+      failures: turn.failures > 0 ? `${turn.failures} ${turn.failures === 1 ? "falha" : "falhas"}` : "sem falhas",
+      running: turn.running,
+      agents: turn.agents.length,
+      meta,
+      tone: turn.failures > 0 ? "warning" : turn.running ? "normal" : "muted"
+    };
+  };
+  var tabCounts = (snapshot) => ({
+    agents: snapshot.agents.filter((agent) => !agent.isMain).length,
+    turns: snapshot.turns.length,
+    diffs: snapshot.diff.length
   });
   var overviewModel = (snapshot) => {
     const { session, counts, recentFiles } = snapshot;
@@ -2018,19 +2059,23 @@ ${GUEST_UI_LOOK_CSS}`;
       }))
     };
   };
-  var agentRows = (snapshot) => snapshot.agents.map((agent) => ({
-    id: agent.id,
-    title: agent.title,
-    depth: agent.depth,
-    isMain: agent.isMain,
-    model: agent.model,
-    status: statusText(agent.status),
-    tone: statusTone(agent.status),
-    cost: formatUsd(agent.cost),
-    tokens: formatTokens(agent.tokens.input + agent.tokens.output + agent.tokens.reasoning + agent.tokens.cacheRead),
-    tools: `${agent.toolCalls}`,
-    canOpen: !agent.isMain
-  }));
+  var agentRows = (snapshot) => snapshot.agents.map((agent) => {
+    const parent = agent.parentId ? snapshot.agents.find((candidate) => candidate.id === agent.parentId) : null;
+    return {
+      id: agent.id,
+      title: agent.title,
+      parentTitle: parent?.title ?? null,
+      depth: agent.depth,
+      isMain: agent.isMain,
+      model: agent.model,
+      status: statusText(agent.status),
+      tone: statusTone(agent.status),
+      cost: formatUsd(agent.cost),
+      tokens: formatTokens(agent.tokens.input + agent.tokens.output + agent.tokens.reasoning + agent.tokens.cacheRead),
+      tools: `${agent.toolCalls}`,
+      canOpen: !agent.isMain
+    };
+  });
   var turnRows = (snapshot) => snapshot.turns.map(turnRow);
   var diffRows = (snapshot) => snapshot.diff.map((file) => ({
     path: shortPath(file.path, 52),
@@ -2066,83 +2111,296 @@ ${GUEST_UI_LOOK_CSS}`;
     { id: "turns", label: strings.tabs.turns },
     { id: "diffs", label: strings.tabs.diffs }
   ];
-  var toneClass = (tone2) => tone2 === "normal" ? "normal" : tone2;
-  var metricCard = (metric) => el2("div", "card", [
-    el2("div", "card-label", undefined, metric.label),
-    el2("div", `card-value ${toneClass(metric.tone)}`, undefined, metric.value),
-    metric.hint ? el2("div", "card-hint", undefined, metric.hint) : null
-  ]);
-  var ring = (percent) => {
-    const size = 86;
-    const stroke = 9;
-    const radius2 = (size - stroke) / 2;
-    const circumference = 2 * Math.PI * radius2;
-    const bounded = Math.max(0, Math.min(100, percent ?? 0));
-    const offset = circumference * (1 - bounded / 100);
-    const tone2 = percent === null ? "var(--oc-muted, #888)" : percent >= 90 ? "var(--oc-error-text, #b91c1c)" : percent >= 70 ? "var(--oc-warning-text, #b45309)" : "var(--oc-primary-text, #2563eb)";
+  var svgIcon = (paths, size = 12) => {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("width", String(size));
     svg.setAttribute("height", String(size));
-    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
-    svg.classList.add("context-ring");
-    const track = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    track.setAttribute("cx", String(size / 2));
-    track.setAttribute("cy", String(size / 2));
-    track.setAttribute("r", String(radius2));
-    track.setAttribute("fill", "none");
-    track.setAttribute("stroke", "var(--oc-border, #ddd)");
-    track.setAttribute("stroke-width", String(stroke));
-    svg.append(track);
-    const value = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    value.setAttribute("cx", String(size / 2));
-    value.setAttribute("cy", String(size / 2));
-    value.setAttribute("r", String(radius2));
-    value.setAttribute("fill", "none");
-    value.setAttribute("stroke", tone2);
-    value.setAttribute("stroke-width", String(stroke));
-    value.setAttribute("stroke-linecap", "round");
-    value.setAttribute("stroke-dasharray", String(circumference));
-    value.setAttribute("stroke-dashoffset", String(offset));
-    value.setAttribute("transform", `rotate(-90 ${size / 2} ${size / 2})`);
-    svg.append(value);
-    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    label.setAttribute("x", String(size / 2));
-    label.setAttribute("y", String(size / 2 + 4));
-    label.setAttribute("text-anchor", "middle");
-    label.setAttribute("fill", "currentColor");
-    label.setAttribute("font-size", "14");
-    label.setAttribute("font-weight", "700");
-    label.textContent = formatPercent(percent);
-    svg.append(label);
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("aria-hidden", "true");
+    for (const d of paths) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("stroke-width", "1.4");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      svg.append(path);
+    }
     return svg;
+  };
+  var chevron = (open) => {
+    const icon2 = svgIcon(["M6 4l4 4-4 4"]);
+    icon2.classList.add("turn-chevron");
+    if (open)
+      icon2.classList.add("open");
+    return icon2;
+  };
+  var statusPill = (label, tone2) => {
+    const pill = el2("span", "lens-status");
+    pill.append(el2("span", `status-dot ${tone2}`), el2("span", undefined, label));
+    return pill;
   };
   var empty = (title, body) => el2("div", "empty", [
     el2("div", "empty-title", undefined, title),
-    body ? el2("div", undefined, undefined, body) : null
+    body ? el2("div", "empty-body", undefined, body) : null
   ]);
   var header = (props) => {
     const session = props.snapshot?.session;
     const title = session?.title ?? strings.app;
-    const subtitle = session ? `${session.agent} · ${session.model.name}${session.model.variant ? ` · ${session.model.variant}` : ""}` : props.hasSession ? "Lendo sessão…" : strings.empty.noSession;
-    const status = session?.status;
-    const statusLabel = status === "running" ? strings.status.running : status === "completed" ? strings.status.completed : status === "failed" ? strings.status.failed : strings.labels.unknown;
+    const subtitle = session ? `${session.agent} · ${session.model.name}${session.model.variant ? ` · ${session.model.variant}` : ""}` : props.hasSession ? "Lendo sessão…" : strings.empty.noSessionHint;
+    const tone2 = session?.status === "running" ? "normal" : session?.status === "failed" ? "danger" : "muted";
+    const statusLabel = session ? strings.status[session.status] ?? strings.labels.unknown : "";
     return el2("div", "lens-header", [
       el2("div", "lens-header-main", [
         el2("div", "lens-title", undefined, title),
         el2("div", "lens-sub", undefined, subtitle)
       ]),
-      status ? el2("span", `badge ${status === "running" ? "normal" : status === "failed" ? "danger" : ""}`, undefined, statusLabel) : null
+      session ? statusPill(statusLabel, tone2) : null
     ]);
+  };
+  var tabCount = (snapshot, id) => {
+    if (!snapshot)
+      return null;
+    const counts = tabCounts(snapshot);
+    if (id === "agents")
+      return counts.agents;
+    if (id === "turns")
+      return counts.turns;
+    if (id === "diffs")
+      return counts.diffs;
+    return null;
   };
   var tabs = (props) => {
     const bar = el2("div", "lens-tabs");
     for (const tab of TABS) {
-      const node = el2("button", `lens-tab ${props.tab === tab.id ? "active" : ""}`, undefined, tab.label);
+      const node = el2("button", `lens-tab ${props.tab === tab.id ? "active" : ""}`);
       node.type = "button";
+      node.setAttribute("aria-pressed", String(props.tab === tab.id));
+      node.append(el2("span", undefined, tab.label));
+      const count = tabCount(props.snapshot, tab.id);
+      if (count !== null && count > 0) {
+        node.append(el2("span", "lens-tab-count", String(count)));
+      }
       node.addEventListener("click", () => props.onTab(tab.id));
       bar.append(node);
     }
     return bar;
+  };
+  var sectionBar = (number, label, count) => {
+    const bar = el2("div", "section-bar");
+    bar.append(el2("span", "section-number", String(number).padStart(2, "0")), el2("span", "section-label", label));
+    if (count !== undefined)
+      bar.append(el2("span", "section-count", String(count)));
+    return bar;
+  };
+  var section = (number, label, content, count) => el2("div", "lens-section", [sectionBar(number, label, count), content]);
+  var statCard = (metric) => {
+    const card = el2("div", "stat-card", [
+      el2("div", "stat-label", undefined, metric.label),
+      el2("div", `stat-value ${metric.tone}`, undefined, metric.value),
+      metric.hint ? el2("div", "stat-hint", undefined, metric.hint) : null
+    ]);
+    if (metric.label === strings.labels.duration)
+      card.classList.add("duration-card");
+    if (metric.label === strings.labels.model)
+      card.classList.add("model-card");
+    return card;
+  };
+  var contextCard = (snapshot, metric) => {
+    const { percent, used, limit } = snapshot.session.context;
+    const fill = el2("div", `context-fill ${metric.tone}`);
+    fill.style.transform = `scaleX(${Math.max(0, Math.min(100, percent ?? 0)) / 100})`;
+    const meter = el2("div", "context-meter");
+    meter.append(fill);
+    return el2("div", "stat-card context-card", [
+      el2("div", "stat-label", undefined, metric.label),
+      el2("div", `stat-value ${metric.tone}`, undefined, metric.value),
+      meter,
+      el2("div", "context-meta", [el2("span", undefined, metric.hint ?? "sem leitura")])
+    ]);
+  };
+  var tokenCard = (tokens) => {
+    const grid = el2("div", "token-grid");
+    for (const token of tokens) {
+      grid.append(el2("div", "token-item", [
+        el2("div", "stat-label", undefined, token.label),
+        el2("div", "token-value", undefined, token.value)
+      ]));
+    }
+    return el2("div", "stat-card token-card", [el2("div", "stat-label", undefined, strings.labels.tokens), grid]);
+  };
+  var metaList = (items, className = "turn-meta") => {
+    const wrap = el2("div", className);
+    items.forEach((item, index) => {
+      if (index > 0)
+        wrap.append(el2("span", "meta-sep", "·"));
+      wrap.append(el2("span", `meta-${item.tone}`, item.text));
+    });
+    return wrap;
+  };
+  var lastTurnCard = (turn) => el2("div", "panel-card turn-summary", [
+    el2("div", "turn-summary-request", undefined, turn.request),
+    metaList(turn.meta)
+  ]);
+  var recentFiles = (files) => {
+    if (files.length === 0)
+      return empty(strings.empty.noRecent);
+    const card = el2("div", "panel-card");
+    for (const file of files) {
+      card.append(el2("div", "list-row", [
+        el2("div", "list-main", [
+          el2("div", "list-path", undefined, file.path),
+          el2("div", "list-meta", undefined, file.action)
+        ]),
+        el2("div", "list-age", undefined, file.age)
+      ]));
+    }
+    return card;
+  };
+  var overview = (snapshot) => {
+    const model = overviewModel(snapshot);
+    const context = model.metrics[0];
+    const cards = model.metrics.slice(1).map(statCard);
+    const grid = el2("div", "lens-grid");
+    if (context)
+      grid.append(contextCard(snapshot, context));
+    grid.append(...cards);
+    return el2("div", undefined, [
+      grid,
+      tokenCard(model.tokens),
+      section(1, strings.sections.lastTurn, model.lastTurn ? lastTurnCard(model.lastTurn) : empty(strings.empty.noTurns)),
+      section(2, strings.sections.recentFiles, recentFiles(model.recentFiles))
+    ]);
+  };
+  var agentIcon = (main) => main ? svgIcon(["M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z", "M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"]) : svgIcon(["M8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3Z", "M5.5 8h5"]);
+  var agentCard = (row, props) => {
+    const card = el2("div", `agent-card ${row.canOpen ? "clickable" : ""}`);
+    card.style.marginLeft = `${row.depth * 10}px`;
+    const avatar = el2("span", `agent-avatar ${row.tone}`);
+    avatar.append(agentIcon(row.isMain));
+    const head = el2("div", "agent-head", [
+      el2("span", "agent-title", undefined, row.title),
+      el2("span", `status-dot ${row.tone}`),
+      el2("span", "muted", undefined, row.status)
+    ]);
+    const meta = el2("div", "agent-meta");
+    if (row.parentTitle)
+      meta.append(el2("span", undefined, `${strings.labels.parent}: ${row.parentTitle}`));
+    meta.append(el2("span", undefined, row.model));
+    const figures = el2("div", "agent-figures", [
+      el2("span", undefined, [el2("b", undefined, undefined, row.cost), " custo"]),
+      el2("span", undefined, [el2("b", undefined, undefined, row.tokens), " tokens"]),
+      el2("span", undefined, [el2("b", undefined, undefined, row.tools), " ferramentas"])
+    ]);
+    const body = el2("div", "agent-body", [head, meta, figures]);
+    card.append(avatar, body);
+    if (row.canOpen) {
+      const open = el2("button", "agent-open", undefined, strings.labels.open);
+      open.type = "button";
+      open.addEventListener("click", (event) => {
+        event.stopPropagation();
+        props.onOpenAgent(row.id);
+      });
+      card.append(open);
+      card.addEventListener("click", () => props.onOpenAgent(row.id));
+    }
+    return card;
+  };
+  var agents = (snapshot, props) => {
+    const rows = agentRows(snapshot);
+    const children = rows.filter((row) => !row.isMain);
+    const content = children.length === 0 ? empty(strings.empty.noAgents) : el2("div", undefined, children.map((row) => agentCard(row, props)));
+    return section(1, strings.sections.agents, content, children.length);
+  };
+  var turnCard = (row, snapshot, props) => {
+    const turn = snapshot.turns.find((entry) => entry.index === row.index);
+    const open = props.expandedTurns.has(row.index);
+    const card = el2("div", "turn-card");
+    const head = el2("button", "turn-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(open));
+    const body = el2("div", "list-main", [
+      el2("div", "turn-request", undefined, row.request),
+      metaList(row.meta)
+    ]);
+    head.append(el2("span", "turn-index", undefined, `#${row.index}`), body);
+    if (row.running) {
+      const state = el2("span", "turn-state");
+      state.append(el2("span", "status-dot normal"), el2("span", undefined, strings.labels.runningTurn));
+      head.append(state);
+    }
+    head.append(chevron(open));
+    head.addEventListener("click", () => props.onToggleTurn(row.index));
+    card.append(head);
+    if (open && turn) {
+      const agentsText = turn.agents.map((id) => snapshot.agents.find((agent) => agent.id === id)?.title ?? id).join(", ");
+      const tokens = turn.tokens.input + turn.tokens.output + turn.tokens.reasoning + turn.tokens.cacheRead + turn.tokens.cacheWrite;
+      const detail = el2("div", "turn-detail", [
+        el2("div", "detail-item detail-full", [
+          el2("div", "detail-label", undefined, strings.labels.request),
+          el2("div", "detail-value", undefined, turn.request || "—")
+        ]),
+        el2("div", "detail-item", [
+          el2("div", "detail-label", undefined, strings.labels.tools),
+          el2("div", "detail-value", undefined, `${turn.toolCalls} ferramentas · ${turn.failures} falhas`)
+        ]),
+        el2("div", "detail-item", [
+          el2("div", "detail-label", undefined, strings.labels.agentTree),
+          el2("div", "detail-value", undefined, agentsText || "—")
+        ]),
+        el2("div", "detail-item", [
+          el2("div", "detail-label", undefined, strings.labels.start),
+          el2("div", "detail-value", undefined, new Date(turn.startedAt).toLocaleTimeString("pt-BR"))
+        ]),
+        el2("div", "detail-item", [
+          el2("div", "detail-label", undefined, strings.labels.tokens),
+          el2("div", "detail-value", undefined, formatTokens(tokens))
+        ])
+      ]);
+      card.append(detail);
+    }
+    return card;
+  };
+  var turns = (snapshot, props) => {
+    const rows = turnRows(snapshot);
+    const content = rows.length === 0 ? empty(strings.empty.noTurns) : el2("div", undefined, rows.map((row) => turnCard(row, snapshot, props)));
+    return section(1, strings.sections.turns, content, rows.length);
+  };
+  var patchLines = (patch) => {
+    const wrap = el2("div", "patch");
+    for (const line of patch.split(`
+`)) {
+      const kind = line === "…" ? "meta" : line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ") ? "meta" : line.startsWith("@@") ? "hunk" : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "context";
+      wrap.append(el2("div", `patch-line ${kind}`, undefined, line.length > 0 ? line : " "));
+    }
+    return wrap;
+  };
+  var diffCard = (row, props) => {
+    const open = props.expandedDiffs.has(row.fullPath);
+    const card = el2("div", "diff-card");
+    const head = el2("button", "diff-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(open));
+    const status = el2("span", `diff-badge ${row.tone}`, undefined, row.status);
+    const counts = el2("span", "diff-counts", [
+      el2("span", "add", undefined, `+${row.additions}`),
+      el2("span", "del", undefined, `−${row.deletions}`)
+    ]);
+    head.append(el2("span", "diff-path", undefined, row.path), status, counts, chevron(open));
+    head.addEventListener("click", () => props.onToggleDiff(row.fullPath));
+    card.append(head);
+    if (open) {
+      card.append(patchLines(row.patch));
+      if (row.truncated)
+        card.append(el2("div", "truncated", undefined, strings.labels.patchTruncated));
+    }
+    return card;
+  };
+  var diffs = (snapshot, props) => {
+    const rows = diffRows(snapshot);
+    const content = rows.length === 0 ? empty(strings.empty.noDiff) : el2("div", undefined, rows.map((row) => diffCard(row, props)));
+    return section(1, strings.sections.diffs, content, rows.length);
   };
   var errorBanner = (props) => {
     if (!props.error)
@@ -2154,184 +2412,572 @@ ${GUEST_UI_LOOK_CSS}`;
       el2("div", "banner-body", undefined, body)
     ]);
   };
-  var overview = (snapshot) => {
-    const model = overviewModel(snapshot);
-    const contextCard = el2("div", "card context-card", [
-      ring(model.contextPercent),
-      el2("div", "context-copy", [
-        el2("div", "card-label", undefined, strings.labels.context),
-        el2("div", "context-value", undefined, formatPercent(model.contextPercent)),
-        el2("div", "card-hint", undefined, snapshot.session.context.used === null ? "sem leitura" : `${formatTokens(snapshot.session.context.used)} de ${formatTokens(snapshot.session.context.limit)}`)
-      ])
-    ]);
-    const tokenChips = el2("div", "chips");
-    for (const token of model.tokens) {
-      tokenChips.append(el2("span", "chip", [el2("strong", undefined, undefined, token.value), ` ${token.label}`]));
-    }
-    const lastTurn = model.lastTurn ? el2("div", "card", [
-      el2("div", "row-title", undefined, model.lastTurn.request),
-      el2("div", "turn-meta", [
-        `#${model.lastTurn.index}`,
-        model.lastTurn.duration,
-        model.lastTurn.cost,
-        model.lastTurn.tools,
-        model.lastTurn.failures
-      ])
-    ]) : empty(strings.empty.noTurns);
-    const recent = model.recentFiles.length ? el2("div", undefined, model.recentFiles.map((file) => el2("div", "row", [
-      el2("div", "row-main", [
-        el2("div", "file-line", [
-          el2("span", "row-title", undefined, file.path),
-          el2("span", "file-action", undefined, file.action)
-        ])
-      ]),
-      el2("span", "row-figures", undefined, file.age)
-    ]))) : empty(strings.empty.noRecent);
-    return el2("div", undefined, [
-      contextCard,
-      el2("div", "grid three", model.metrics.filter((metric) => metric.label !== strings.labels.context).map(metricCard)),
-      el2("div", "section", [
-        el2("div", "section-head", [el2("span", "section-title", undefined, strings.labels.tokens)]),
-        tokenChips
-      ]),
-      el2("div", "section", [
-        el2("div", "section-head", [el2("span", "section-title", undefined, strings.labels.lastTurn)]),
-        lastTurn
-      ]),
-      el2("div", "section", [
-        el2("div", "section-head", [el2("span", "section-title", undefined, strings.labels.recentFiles)]),
-        recent
-      ])
-    ]);
-  };
-  var agentNode = (row, props) => {
-    const node = el2("div", `row agent-row ${row.canOpen ? "clickable" : ""}`, [
-      el2("div", "agent-main", [
-        el2("div", "agent-head", [
-          el2("span", "agent-title", undefined, `${row.isMain ? "◉" : "◈"} ${row.title}`),
-          el2("span", `badge ${toneClass(row.tone)}`, undefined, row.status)
-        ]),
-        el2("div", "agent-meta", [
-          row.model,
-          row.cost,
-          `${row.tokens} tokens`,
-          `${row.tools} ferramentas`
-        ])
-      ])
-    ]);
-    node.style.paddingLeft = `${8 + row.depth * 14}px`;
-    if (row.canOpen) {
-      node.setAttribute("role", "button");
-      node.setAttribute("tabindex", "0");
-      node.title = strings.labels.openSession;
-      node.addEventListener("click", () => props.onOpenAgent(row.id));
-      node.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          props.onOpenAgent(row.id);
-        }
-      });
-    }
-    return node;
-  };
-  var agents = (snapshot, props) => {
-    const rows = agentRows(snapshot);
-    if (rows.length === 0)
-      return empty(strings.empty.noAgents);
-    return el2("div", undefined, rows.map((row) => agentNode(row, props)));
-  };
-  var turns = (snapshot, props) => {
-    const rows = turnRows(snapshot);
-    if (rows.length === 0)
-      return empty(strings.empty.noTurns);
-    return el2("div", undefined, rows.map((row) => {
-      const turn = snapshot.turns.find((entry) => entry.index === row.index);
-      const isOpen = props.expandedTurns.has(row.index);
-      const card = el2("div", "row turn-card");
-      const head = el2("div", "turn-head", [
-        el2("span", "turn-index", undefined, `#${row.index}`),
-        el2("div", "row-main", [
-          el2("div", "turn-request", undefined, row.request),
-          el2("div", "turn-meta", [
-            row.duration,
-            row.cost,
-            row.tools,
-            row.failures,
-            row.agents > 0 ? `${row.agents} agentes` : null,
-            row.running ? strings.labels.runningTurn : null
-          ])
-        ])
-      ]);
-      head.addEventListener("click", () => props.onToggleTurn(row.index));
-      card.append(head);
-      if (isOpen && turn) {
-        card.append(el2("div", "turn-detail", [
-          el2("div", "turn-detail-label", undefined, strings.labels.request),
-          el2("div", "turn-detail-text", undefined, turn.request || "—"),
-          el2("div", "turn-detail-label", undefined, strings.labels.tools),
-          el2("div", "turn-detail-text", undefined, `${turn.toolCalls} ferramentas · ${turn.failures} falhas`),
-          turn.agents.length > 0 ? el2("div", "turn-detail-label", undefined, strings.labels.agentTree) : null,
-          turn.agents.length > 0 ? el2("div", "turn-detail-text", undefined, turn.agents.join(", ")) : null
-        ]));
-      }
-      return card;
-    }));
-  };
-  var useLine = (value) => el2("pre", "patch", undefined, value.length > 0 ? value : "—");
-  var diffs = (snapshot, props) => {
-    const rows = diffRows(snapshot);
-    if (rows.length === 0)
-      return empty(strings.empty.noDiff);
-    return el2("div", undefined, rows.map((row) => {
-      const card = el2("div", "row diff-row");
-      const head = el2("div", "diff-head", [
-        el2("span", `row-title diff-path`, undefined, row.path),
-        el2("span", "row-figures", [
-          el2("span", "add", undefined, `+${row.additions}`),
-          el2("span", "del", undefined, `−${row.deletions}`)
-        ]),
-        el2("span", "file-action", undefined, row.status)
-      ]);
-      head.addEventListener("click", () => props.onToggleDiff(row.fullPath));
-      card.append(head);
-      if (props.expandedDiffs.has(row.fullPath)) {
-        card.append(useLine(row.patch));
-        if (row.truncated)
-          card.append(el2("div", "truncated", undefined, strings.labels.patchTruncated));
-      }
-      return card;
-    }));
-  };
   var renderPanel = (root, props) => {
     root.replaceChildren();
+    root.append(header(props));
     if (!props.hasSession) {
-      root.append(header(props), empty(strings.empty.noSession, strings.empty.noSessionHint));
+      root.append(empty(strings.empty.noSession, strings.empty.noSessionHint));
       return;
     }
-    root.append(header(props), tabs(props));
+    root.append(tabs(props));
     const banner = errorBanner(props);
     if (banner)
       root.append(banner);
-    const snapshot = props.snapshot;
-    if (!snapshot) {
+    if (!props.snapshot) {
       root.append(empty(props.error ? "Sem dados" : "Lendo sessão…"));
       return;
     }
     if (props.tab === "overview")
-      root.append(overview(snapshot));
+      root.append(overview(props.snapshot));
     else if (props.tab === "agents")
-      root.append(agents(snapshot, props));
+      root.append(agents(props.snapshot, props));
     else if (props.tab === "turns")
-      root.append(turns(snapshot, props));
+      root.append(turns(props.snapshot, props));
     else
-      root.append(diffs(snapshot, props));
+      root.append(diffs(props.snapshot, props));
   };
+
+  // src/panel/styles.ts
+  var LENS_TOKENS = `
+:root {
+  color-scheme: light dark;
+  --lens-bg: var(--oc-bg, #0b0f14);
+  --lens-surface: var(--oc-elevated, #12171d);
+  --lens-surface-2: var(--oc-muted-surface, #161b22);
+  --lens-border: var(--oc-border, #2a323d);
+  --lens-text: var(--oc-fg, #e6edf3);
+  --lens-muted: var(--oc-muted, #8b949e);
+  --lens-accent: var(--oc-primary, #2f81f7);
+  --lens-accent-text: var(--oc-primary-text, #58a6ff);
+  --lens-accent-fg: var(--oc-primary-fg, #ffffff);
+  --lens-ok: var(--oc-success, #3fb950);
+  --lens-ok-text: var(--oc-success-text, #3fb950);
+  --lens-warn: var(--oc-warning, #d29922);
+  --lens-warn-text: var(--oc-warning-text, #d29922);
+  --lens-danger: var(--oc-error, #f85149);
+  --lens-danger-text: var(--oc-error-text, #f85149);
+  --lens-info: var(--oc-info, #58a6ff);
+  --lens-mono: var(--oc-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  --lens-radius: var(--oc-radius, 8px);
+  --lens-pad: 16px;
+}
+* { box-sizing: border-box; }
+::selection { background: color-mix(in srgb, var(--lens-accent) 30%, transparent); }
+:focus-visible { outline: 2px solid var(--lens-accent); outline-offset: 2px; }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--lens-muted); flex: 0 0 auto; }
+.status-dot.normal { background: var(--lens-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--lens-ok) 14%, transparent); }
+.status-dot.warning { background: var(--lens-warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--lens-warn) 14%, transparent); }
+.status-dot.danger { background: var(--lens-danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--lens-danger) 14%, transparent); }
+.status-dot.muted { background: var(--lens-muted); }
+`;
+  var PANEL_STYLE = `${LENS_TOKENS}
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--lens-bg);
+  color: var(--lens-text);
+  font-family: var(--oc-font, system-ui, sans-serif);
+  font-size: 12px;
+  line-height: 1.45;
+}
+#root {
+  height: 100%;
+  overflow: auto;
+  padding: var(--lens-pad);
+  scrollbar-width: thin;
+  scrollbar-color: var(--lens-border) transparent;
+}
+#root::-webkit-scrollbar { width: 8px; height: 8px; }
+#root::-webkit-scrollbar-thumb { background: var(--lens-border); border-radius: 999px; }
+#root::-webkit-scrollbar-track { background: transparent; }
+
+.lens-header { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; }
+.lens-header-main { flex: 1; min-width: 0; }
+.lens-title {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+  color: var(--lens-text);
+  overflow-wrap: anywhere;
+}
+.lens-sub {
+  margin-top: 2px;
+  color: var(--lens-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lens-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid var(--lens-border);
+  border-radius: 999px;
+  background: var(--lens-surface);
+  color: var(--lens-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.lens-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.lens-tabs::-webkit-scrollbar { display: none; }
+.lens-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--lens-border);
+  border-radius: 999px;
+  background: var(--lens-surface);
+  color: var(--lens-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+.lens-tab:hover { color: var(--lens-text); background: var(--lens-surface-2); }
+.lens-tab.active {
+  border-color: transparent;
+  background: var(--lens-accent);
+  color: var(--lens-accent-fg);
+}
+.lens-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.lens-tab.active .lens-tab-count { background: color-mix(in srgb, var(--lens-accent-fg) 22%, transparent); }
+
+.lens-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.stat-card {
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--lens-border);
+  border-radius: var(--lens-radius);
+  background: var(--lens-surface);
+}
+.stat-label {
+  color: var(--lens-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.stat-value {
+  margin-top: 3px;
+  color: var(--lens-text);
+  font-size: 22px;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stat-value.normal { color: var(--lens-accent-text); }
+.stat-value.warning { color: var(--lens-warn-text); }
+.stat-value.danger { color: var(--lens-danger-text); }
+.stat-value.muted { color: var(--lens-text); }
+.model-card .stat-value {
+  font-size: 16px;
+  line-height: 1.25;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
+.stat-hint {
+  margin-top: 2px;
+  color: var(--lens-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.context-card { grid-column: 1 / -1; }
+.duration-card { grid-column: 1 / -1; }
+.context-meter {
+  height: 4px;
+  margin-top: 9px;
+  border-radius: 999px;
+  background: var(--lens-border);
+  overflow: hidden;
+}
+.context-fill { width: 100%; height: 100%; transform-origin: left center; transform: scaleX(0); border-radius: inherit; background: var(--lens-accent); transition: transform 200ms ease; }
+.context-fill.normal { background: var(--lens-accent); }
+.context-fill.warning { background: var(--lens-warn); }
+.context-fill.danger { background: var(--lens-danger); }
+.context-fill.muted { background: var(--lens-muted); }
+.context-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 5px;
+  color: var(--lens-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.token-card { grid-column: 1 / -1; }
+.token-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 7px; }
+.token-value { margin-top: 1px; font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--lens-text); }
+
+.lens-section { display: flex; flex-direction: column; gap: 7px; margin-top: 14px; }
+.section-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 9px 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--lens-accent) 20%, var(--lens-border));
+  border-left: 1px solid var(--lens-accent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--lens-accent) 7%, var(--lens-surface));
+}
+.section-number {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid color-mix(in srgb, var(--lens-warn) 75%, var(--lens-border));
+  border-radius: 50%;
+  color: var(--lens-warn-text);
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.section-label { font-size: 12px; font-weight: 600; color: var(--lens-text); }
+.section-count { margin-left: auto; color: var(--lens-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+
+.panel-card {
+  border: 1px solid var(--lens-border);
+  border-radius: var(--lens-radius);
+  background: var(--lens-surface);
+  overflow: hidden;
+}
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--lens-border) 65%, transparent);
+}
+.list-row:last-child { border-bottom: 0; }
+.list-main { flex: 1; min-width: 0; }
+.list-path {
+  font-family: var(--lens-mono);
+  font-size: 11px;
+  color: var(--lens-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.list-meta { margin-top: 1px; color: var(--lens-muted); font-size: 10px; }
+.list-age { color: var(--lens-muted); font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.turn-summary { padding: 10px 11px; }
+.turn-summary-request { font-size: 12px; font-weight: 600; color: var(--lens-text); overflow-wrap: anywhere; }
+.turn-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; margin-top: 3px; color: var(--lens-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.meta-sep { color: color-mix(in srgb, var(--lens-muted) 55%, transparent); }
+.meta-warning { color: var(--lens-warn-text); }
+.meta-danger { color: var(--lens-danger-text); }
+.meta-normal { color: var(--lens-accent-text); }
+.meta-muted { color: var(--lens-muted); }
+
+.agent-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--lens-border);
+  border-radius: var(--lens-radius);
+  background: var(--lens-surface);
+  margin-bottom: 6px;
+}
+.agent-card:last-child { margin-bottom: 0; }
+.agent-card.clickable { cursor: pointer; transition: border-color 150ms ease, background 150ms ease; }
+.agent-card.clickable:hover { border-color: color-mix(in srgb, var(--lens-accent) 45%, var(--lens-border)); background: var(--lens-surface-2); }
+.agent-avatar {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--lens-border);
+  border-radius: 50%;
+  color: var(--lens-muted);
+  background: var(--lens-surface-2);
+}
+.agent-avatar.normal { border-color: color-mix(in srgb, var(--lens-ok) 55%, var(--lens-border)); color: var(--lens-ok-text); }
+.agent-avatar.warning { border-color: color-mix(in srgb, var(--lens-warn) 55%, var(--lens-border)); color: var(--lens-warn-text); }
+.agent-avatar.danger { border-color: color-mix(in srgb, var(--lens-danger) 55%, var(--lens-border)); color: var(--lens-danger-text); }
+.agent-body { flex: 1; min-width: 0; }
+.agent-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.agent-title { font-size: 12px; font-weight: 600; color: var(--lens-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-meta { display: flex; flex-wrap: wrap; gap: 3px 7px; margin-top: 2px; color: var(--lens-muted); font-size: 10px; }
+.agent-figures { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 4px; color: var(--lens-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.agent-figures b { color: var(--lens-text); font-weight: 600; }
+.agent-open {
+  align-self: center;
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--lens-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--lens-muted);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.agent-open:hover { color: var(--lens-text); border-color: var(--lens-accent); }
+
+.turn-card { border: 1px solid var(--lens-border); border-radius: var(--lens-radius); background: var(--lens-surface); margin-bottom: 6px; overflow: hidden; }
+.turn-card:last-child { margin-bottom: 0; }
+.turn-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.turn-head:hover { background: var(--lens-surface-2); }
+.turn-index {
+  flex: 0 0 auto;
+  min-width: 20px;
+  padding-top: 1px;
+  color: var(--lens-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.turn-request { flex: 1; min-width: 0; font-size: 12px; font-weight: 600; color: var(--lens-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-chevron { flex: 0 0 auto; color: var(--lens-muted); transition: transform 150ms ease; }
+.turn-chevron.open { transform: rotate(90deg); }
+.turn-state { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: var(--lens-muted); font-size: 10px; white-space: nowrap; }
+.turn-detail {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px 14px;
+  padding: 10px;
+  border-top: 1px solid var(--lens-border);
+  background: var(--lens-surface-2);
+}
+.detail-item { min-width: 0; }
+.detail-label { color: var(--lens-muted); font-size: 9px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.detail-value { margin-top: 2px; color: var(--lens-text); font-size: 11px; overflow-wrap: anywhere; }
+.detail-full { grid-column: 1 / -1; }
+
+.diff-card { border: 1px solid var(--lens-border); border-radius: var(--lens-radius); background: var(--lens-surface); margin-bottom: 6px; overflow: hidden; }
+.diff-card:last-child { margin-bottom: 0; }
+.diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-head:hover { background: var(--lens-surface-2); }
+.diff-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--lens-mono);
+  font-size: 11px;
+  color: var(--lens-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--lens-border);
+  border-radius: 999px;
+  color: var(--lens-muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.diff-badge.normal { color: var(--lens-ok-text); border-color: color-mix(in srgb, var(--lens-ok) 45%, var(--lens-border)); }
+.diff-badge.danger { color: var(--lens-danger-text); border-color: color-mix(in srgb, var(--lens-danger) 45%, var(--lens-border)); }
+.diff-counts { display: inline-flex; gap: 5px; flex: 0 0 auto; font-size: 10px; font-variant-numeric: tabular-nums; }
+.add { color: var(--lens-ok-text); }
+.del { color: var(--lens-danger-text); }
+.patch {
+  border-top: 1px solid var(--lens-border);
+  background: var(--lens-bg);
+  max-height: 380px;
+  overflow: auto;
+  padding: 6px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--lens-border) transparent;
+}
+.patch-line {
+  display: block;
+  min-width: max-content;
+  padding: 0 10px;
+  font-family: var(--lens-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre;
+  color: var(--lens-text);
+}
+.patch-line.add { background: color-mix(in srgb, var(--lens-ok) 13%, transparent); color: var(--lens-ok-text); }
+.patch-line.del { background: color-mix(in srgb, var(--lens-danger) 13%, transparent); color: var(--lens-danger-text); }
+.patch-line.hunk { background: var(--lens-surface-2); color: var(--lens-muted); }
+.patch-line.meta { color: var(--lens-muted); }
+.truncated { padding: 5px 10px 8px; color: var(--lens-warn-text); font-size: 10px; }
+
+.banner {
+  padding: 9px 11px;
+  margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--lens-warn) 45%, var(--lens-border));
+  border-radius: var(--lens-radius);
+  background: color-mix(in srgb, var(--lens-warn) 9%, var(--lens-surface));
+}
+.banner.error { border-color: color-mix(in srgb, var(--lens-danger) 45%, var(--lens-border)); background: color-mix(in srgb, var(--lens-danger) 8%, var(--lens-surface)); }
+.banner-title { font-size: 11px; font-weight: 700; color: var(--lens-text); }
+.banner-body { margin-top: 2px; color: var(--lens-muted); font-size: 10px; line-height: 1.4; }
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 72px;
+  padding: 18px 12px;
+  border: 1px dashed var(--lens-border);
+  border-radius: var(--lens-radius);
+  background: var(--lens-surface);
+  text-align: center;
+}
+.empty-title { color: var(--lens-text); font-size: 12px; font-weight: 600; }
+.empty-body { color: var(--lens-muted); font-size: 10px; }
+.muted { color: var(--lens-muted); }
+
+@media (min-width: 480px) {
+  .lens-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .context-card { grid-column: auto; }
+  .duration-card { grid-column: auto; }
+}
+@media (max-width: 520px) {
+  .token-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .turn-detail { grid-template-columns: 1fr; }
+  .detail-full { grid-column: auto; }
+}
+@media (max-width: 360px) {
+  :root { --lens-pad: 12px; }
+  .lens-title { font-size: 16px; }
+  .lens-status { padding: 2px 6px; }
+  .lens-tabs { gap: 4px; }
+  .lens-tab { height: 26px; padding: 0 8px; gap: 5px; font-size: 11px; }
+  .lens-tab-count { min-width: 14px; height: 14px; font-size: 8px; }
+  .stat-value { font-size: 19px; }
+  .token-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .agent-figures { width: 100%; }
+}
+@media (max-width: 300px) {
+  .lens-grid { grid-template-columns: 1fr; }
+  .context-card { grid-column: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+`;
+  var STATUS_STYLE = `${LENS_TOKENS}
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--lens-bg);
+  color: var(--lens-text);
+  font-family: var(--oc-font, system-ui, sans-serif);
+  font-size: 11px;
+  line-height: 1.4;
+}
+#root {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  height: 100%;
+  padding: 8px 10px;
+  overflow: hidden;
+}
+.strip-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.strip-session {
+  flex: 1;
+  min-width: 0;
+  color: var(--lens-muted);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strip-status { display: inline-flex; align-items: center; gap: 4px; color: var(--lens-muted); font-size: 9px; white-space: nowrap; }
+.strip-pills { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.strip-pill { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.strip-pill .label { color: var(--lens-muted); font-size: 9px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.strip-pill .value { color: var(--lens-text); font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.strip-pill .value.normal { color: var(--lens-accent-text); }
+.strip-pill .value.warning { color: var(--lens-warn-text); }
+.strip-pill .value.danger { color: var(--lens-danger-text); }
+.strip-pill .value.muted { color: var(--lens-text); }
+.strip-empty { color: var(--lens-muted); font-size: 10px; }
+.strip-error { color: var(--lens-danger-text); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 340px) {
+  .strip-pills { gap: 3px 6px; }
+  .strip-model { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+`;
 
   // src/panel/main.ts
   var host = connectHost();
   var root = document.querySelector("#root");
   if (!root)
     throw new Error("Missing #root");
+  var style = document.createElement("style");
+  style.textContent = PANEL_STYLE;
+  document.head.append(style);
   var mounted = false;
   var sessionId = null;
   var snapshot = null;

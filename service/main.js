@@ -245,6 +245,23 @@ var countLines = (patch) => {
   }
   return { additions, deletions };
 };
+var isChangeLine = (line) => line.startsWith("+") && !line.startsWith("+++") || line.startsWith("-") && !line.startsWith("---");
+var clipPatch = (patch, limit) => {
+  if (patch.length <= limit)
+    return patch;
+  const lines = patch.split(`
+`);
+  const hunk = lines.findIndex((line) => line.startsWith("@@"));
+  const firstChange = lines.findIndex((line, index) => index > hunk && isChangeLine(line));
+  if (firstChange < 0)
+    return patch.slice(0, limit);
+  const header = lines.slice(0, Math.max(0, hunk + 1));
+  const start = Math.max(hunk + 1, firstChange - 4);
+  const body = lines.slice(start);
+  const merged = [...header, ...start > hunk + 1 ? ["…"] : [], ...body].join(`
+`);
+  return merged.slice(0, limit);
+};
 var deriveDiff = (raw) => {
   let budget = PATCH_TOTAL_LIMIT;
   return raw.filter((entry) => typeof entry.file === "string").filter((entry) => {
@@ -261,7 +278,7 @@ var deriveDiff = (raw) => {
       status: diffStatus(patch),
       additions: counted.additions,
       deletions: counted.deletions,
-      patch: clipped ? patch.slice(0, allowed) : patch,
+      patch: clipped ? clipPatch(patch, allowed) : patch,
       truncated: clipped
     };
   });

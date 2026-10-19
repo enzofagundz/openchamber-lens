@@ -6,12 +6,12 @@
 
 **Status:** ready-for-agent
 
-- [ ] Six stat cards exist and reflow from three columns to two and then one.
-- [ ] Context card shows percentage, used/limit and a 4px horizontal bar.
-- [ ] Context fill uses accent below 70%, warning at 70–89% and danger at 90%+; unknown is muted.
-- [ ] Cost, tools, files, model and duration cards show the intended label/value/hint hierarchy.
-- [ ] Tools card distinguishes total calls from failure count.
-- [ ] Token values render as five separate label/value pairs, never a concatenated string.
-- [ ] No card overflows or clips at 320px.
-- [ ] View-model tests cover the card values and context tone; typecheck and build pass.
-- [ ] The installed Overview tab shows the grid and bar in OpenChamber.
+- [x] Six stat cards exist and reflow from three columns to two and then one.
+- [x] Context card shows percentage, used/limit and a 4px horizontal bar.
+- [x] Context fill uses accent below 70%, warning at 70–89% and danger at 90%+; unknown is muted.
+- [x] Cost, tools, files, model and duration cards show the intended label/value/hint hierarchy.
+- [x] Tools card distinguishes total calls from failure count.
+- [x] Token values render as five separate label/value pairs, never a concatenated string.
+- [x] No card overflows or clips at 320px.
+- [x] View-model tests cover the card values and context tone; typecheck and build pass.
+- [x] The installed Overview tab shows the grid and bar in OpenChamber.

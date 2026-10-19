@@ -53,6 +53,15 @@ bun test
 
 Depois de alterar `panel/` ou `status/`, rode `bun run build` e recarregue o painel. O OpenChamber não compila TypeScript na instalação: os arquivos `panel/main.js`, `status/main.js` e `service/main.js` precisam existir no pacote.
 
+Smoke visual (opcional, com o OpenChamber rodando):
+
+```bash
+bun add -d @playwright/test
+bun run visual:smoke
+```
+
+O smoke abre a sessão atual, verifica 320/480/880px em claro e escuro, mede overflow e confere a faixa do Work Status. Sem app ou sem Playwright, ele encerra com `skipped` em vez de falhar.
+
 Estrutura:
 
 - `src/panel`: painel de quatro abas.

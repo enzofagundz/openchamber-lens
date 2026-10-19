@@ -1,7 +1,18 @@
-import { formatPercent, formatTokens } from '../shared/format.ts';
+import { formatTokens } from '../shared/format.ts';
 import { strings, errorText } from '../shared/strings.ts';
 import type { LensSnapshot } from '../shared/types.ts';
-import { agentRows, diffRows, overviewModel, turnRows, type AgentRow, type Metric } from '../shared/view.ts';
+import {
+  agentRows,
+  diffRows,
+  overviewModel,
+  tabCounts,
+  turnRows,
+  type AgentRow,
+  type DiffRow,
+  type Metric,
+  type TurnMeta,
+  type TurnRow,
+} from '../shared/view.ts';
 import { el } from './dom.ts';
 
 export type PanelTab = 'overview' | 'agents' | 'turns' | 'diffs';
@@ -26,69 +37,42 @@ const TABS: Array<{ id: PanelTab; label: string }> = [
   { id: 'diffs', label: strings.tabs.diffs },
 ];
 
-const toneClass = (tone: Metric['tone']): string => (tone === 'normal' ? 'normal' : tone);
-
-const metricCard = (metric: Metric): HTMLElement =>
-  el('div', 'card', [
-    el('div', 'card-label', undefined, metric.label),
-    el('div', `card-value ${toneClass(metric.tone)}`, undefined, metric.value),
-    metric.hint ? el('div', 'card-hint', undefined, metric.hint) : null,
-  ]);
-
-const ring = (percent: number | null): SVGSVGElement => {
-  const size = 86;
-  const stroke = 9;
-  const radius = (size - stroke) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const bounded = Math.max(0, Math.min(100, percent ?? 0));
-  const offset = circumference * (1 - bounded / 100);
-  const tone = percent === null ? 'var(--oc-muted, #888)' : percent >= 90 ? 'var(--oc-error-text, #b91c1c)' : percent >= 70 ? 'var(--oc-warning-text, #b45309)' : 'var(--oc-primary-text, #2563eb)';
-
+const svgIcon = (paths: string[], size = 12): SVGSVGElement => {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('width', String(size));
   svg.setAttribute('height', String(size));
-  svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
-  svg.classList.add('context-ring');
-
-  const track = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  track.setAttribute('cx', String(size / 2));
-  track.setAttribute('cy', String(size / 2));
-  track.setAttribute('r', String(radius));
-  track.setAttribute('fill', 'none');
-  track.setAttribute('stroke', 'var(--oc-border, #ddd)');
-  track.setAttribute('stroke-width', String(stroke));
-  svg.append(track);
-
-  const value = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  value.setAttribute('cx', String(size / 2));
-  value.setAttribute('cy', String(size / 2));
-  value.setAttribute('r', String(radius));
-  value.setAttribute('fill', 'none');
-  value.setAttribute('stroke', tone);
-  value.setAttribute('stroke-width', String(stroke));
-  value.setAttribute('stroke-linecap', 'round');
-  value.setAttribute('stroke-dasharray', String(circumference));
-  value.setAttribute('stroke-dashoffset', String(offset));
-  value.setAttribute('transform', `rotate(-90 ${size / 2} ${size / 2})`);
-  svg.append(value);
-
-  const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-  label.setAttribute('x', String(size / 2));
-  label.setAttribute('y', String(size / 2 + 4));
-  label.setAttribute('text-anchor', 'middle');
-  label.setAttribute('fill', 'currentColor');
-  label.setAttribute('font-size', '14');
-  label.setAttribute('font-weight', '700');
-  label.textContent = formatPercent(percent);
-  svg.append(label);
-
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('aria-hidden', 'true');
+  for (const d of paths) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('stroke', 'currentColor');
+    path.setAttribute('stroke-width', '1.4');
+    path.setAttribute('stroke-linecap', 'round');
+    path.setAttribute('stroke-linejoin', 'round');
+    svg.append(path);
+  }
   return svg;
+};
+
+const chevron = (open: boolean): SVGSVGElement => {
+  const icon = svgIcon(['M6 4l4 4-4 4']);
+  icon.classList.add('turn-chevron');
+  if (open) icon.classList.add('open');
+  return icon;
+};
+
+const statusPill = (label: string, tone: Metric['tone']): HTMLElement => {
+  const pill = el('span', 'lens-status');
+  pill.append(el('span', `status-dot ${tone}`), el('span', undefined, label));
+  return pill;
 };
 
 const empty = (title: string, body?: string): HTMLElement =>
   el('div', 'empty', [
     el('div', 'empty-title', undefined, title),
-    body ? el('div', undefined, undefined, body) : null,
+    body ? el('div', 'empty-body', undefined, body) : null,
   ]);
 
 const header = (props: PanelProps): HTMLElement => {
@@ -98,263 +82,366 @@ const header = (props: PanelProps): HTMLElement => {
     ? `${session.agent} · ${session.model.name}${session.model.variant ? ` · ${session.model.variant}` : ''}`
     : props.hasSession
       ? 'Lendo sessão…'
-      : strings.empty.noSession;
-  const status = session?.status;
-  const statusLabel =
-    status === 'running'
-      ? strings.status.running
-      : status === 'completed'
-        ? strings.status.completed
-        : status === 'failed'
-          ? strings.status.failed
-          : strings.labels.unknown;
+      : strings.empty.noSessionHint;
+  const tone: Metric['tone'] =
+    session?.status === 'running' ? 'normal' : session?.status === 'failed' ? 'danger' : 'muted';
+  const statusLabel = session
+    ? strings.status[session.status as keyof typeof strings.status] ?? strings.labels.unknown
+    : '';
 
   return el('div', 'lens-header', [
     el('div', 'lens-header-main', [
       el('div', 'lens-title', undefined, title),
       el('div', 'lens-sub', undefined, subtitle),
     ]),
-    status
-      ? el('span', `badge ${status === 'running' ? 'normal' : status === 'failed' ? 'danger' : ''}`, undefined, statusLabel)
-      : null,
+    session ? statusPill(statusLabel, tone) : null,
   ]);
+};
+
+const tabCount = (snapshot: LensSnapshot | null, id: PanelTab): number | null => {
+  if (!snapshot) return null;
+  const counts = tabCounts(snapshot);
+  if (id === 'agents') return counts.agents;
+  if (id === 'turns') return counts.turns;
+  if (id === 'diffs') return counts.diffs;
+  return null;
 };
 
 const tabs = (props: PanelProps): HTMLElement => {
   const bar = el('div', 'lens-tabs');
   for (const tab of TABS) {
-    const node = el('button', `lens-tab ${props.tab === tab.id ? 'active' : ''}`, undefined, tab.label);
+    const node = el('button', `lens-tab ${props.tab === tab.id ? 'active' : ''}`);
     node.type = 'button';
+    node.setAttribute('aria-pressed', String(props.tab === tab.id));
+    node.append(el('span', undefined, tab.label));
+    const count = tabCount(props.snapshot, tab.id);
+    if (count !== null && count > 0) {
+      node.append(el('span', 'lens-tab-count', String(count)));
+    }
     node.addEventListener('click', () => props.onTab(tab.id));
     bar.append(node);
   }
   return bar;
 };
 
+const sectionBar = (number: number, label: string, count?: number): HTMLElement => {
+  const bar = el('div', 'section-bar');
+  bar.append(
+    el('span', 'section-number', String(number).padStart(2, '0')),
+    el('span', 'section-label', label),
+  );
+  if (count !== undefined) bar.append(el('span', 'section-count', String(count)));
+  return bar;
+};
+
+const section = (number: number, label: string, content: HTMLElement, count?: number): HTMLElement =>
+  el('div', 'lens-section', [sectionBar(number, label, count), content]);
+
+const statCard = (metric: Metric): HTMLElement => {
+  const card = el('div', 'stat-card', [
+    el('div', 'stat-label', undefined, metric.label),
+    el('div', `stat-value ${metric.tone}`, undefined, metric.value),
+    metric.hint ? el('div', 'stat-hint', undefined, metric.hint) : null,
+  ]);
+  if (metric.label === strings.labels.duration) card.classList.add('duration-card');
+  if (metric.label === strings.labels.model) card.classList.add('model-card');
+  return card;
+};
+
+const contextCard = (snapshot: LensSnapshot, metric: Metric): HTMLElement => {
+  const { percent, used, limit } = snapshot.session.context;
+  const fill = el('div', `context-fill ${metric.tone}`);
+  fill.style.transform = `scaleX(${Math.max(0, Math.min(100, percent ?? 0)) / 100})`;
+  const meter = el('div', 'context-meter');
+  meter.append(fill);
+  return el('div', 'stat-card context-card', [
+    el('div', 'stat-label', undefined, metric.label),
+    el('div', `stat-value ${metric.tone}`, undefined, metric.value),
+    meter,
+    el('div', 'context-meta', [el('span', undefined, metric.hint ?? 'sem leitura')]),
+  ]);
+};
+
+const tokenCard = (tokens: Metric[]): HTMLElement => {
+  const grid = el('div', 'token-grid');
+  for (const token of tokens) {
+    grid.append(
+      el('div', 'token-item', [
+        el('div', 'stat-label', undefined, token.label),
+        el('div', 'token-value', undefined, token.value),
+      ]),
+    );
+  }
+  return el('div', 'stat-card token-card', [el('div', 'stat-label', undefined, strings.labels.tokens), grid]);
+};
+
+const metaList = (items: TurnMeta[], className = 'turn-meta'): HTMLElement => {
+  const wrap = el('div', className);
+  items.forEach((item, index) => {
+    if (index > 0) wrap.append(el('span', 'meta-sep', '·'));
+    wrap.append(el('span', `meta-${item.tone}`, item.text));
+  });
+  return wrap;
+};
+
+const lastTurnCard = (turn: TurnRow): HTMLElement =>
+  el('div', 'panel-card turn-summary', [
+    el('div', 'turn-summary-request', undefined, turn.request),
+    metaList(turn.meta),
+  ]);
+
+const recentFiles = (
+  files: Array<{ path: string; action: string; age: string }>,
+): HTMLElement => {
+  if (files.length === 0) return empty(strings.empty.noRecent);
+  const card = el('div', 'panel-card');
+  for (const file of files) {
+    card.append(
+      el('div', 'list-row', [
+        el('div', 'list-main', [
+          el('div', 'list-path', undefined, file.path),
+          el('div', 'list-meta', undefined, file.action),
+        ]),
+        el('div', 'list-age', undefined, file.age),
+      ]),
+    );
+  }
+  return card;
+};
+
+const overview = (snapshot: LensSnapshot): HTMLElement => {
+  const model = overviewModel(snapshot);
+  const context = model.metrics[0];
+  const cards = model.metrics.slice(1).map(statCard);
+  const grid = el('div', 'lens-grid');
+  if (context) grid.append(contextCard(snapshot, context));
+  grid.append(...cards);
+
+  return el('div', undefined, [
+    grid,
+    tokenCard(model.tokens),
+    section(
+      1,
+      strings.sections.lastTurn,
+      model.lastTurn ? lastTurnCard(model.lastTurn) : empty(strings.empty.noTurns),
+    ),
+    section(2, strings.sections.recentFiles, recentFiles(model.recentFiles)),
+  ]);
+};
+
+const agentIcon = (main: boolean): SVGSVGElement =>
+  main
+    ? svgIcon(['M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z', 'M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z'])
+    : svgIcon(['M8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3Z', 'M5.5 8h5']);
+
+const agentCard = (row: AgentRow, props: PanelProps): HTMLElement => {
+  const card = el('div', `agent-card ${row.canOpen ? 'clickable' : ''}`);
+  card.style.marginLeft = `${row.depth * 10}px`;
+
+  const avatar = el('span', `agent-avatar ${row.tone}`);
+  avatar.append(agentIcon(row.isMain));
+
+  const head = el('div', 'agent-head', [
+    el('span', 'agent-title', undefined, row.title),
+    el('span', `status-dot ${row.tone}`),
+    el('span', 'muted', undefined, row.status),
+  ]);
+
+  const meta = el('div', 'agent-meta');
+  if (row.parentTitle) meta.append(el('span', undefined, `${strings.labels.parent}: ${row.parentTitle}`));
+  meta.append(el('span', undefined, row.model));
+
+  const figures = el('div', 'agent-figures', [
+    el('span', undefined, [el('b', undefined, undefined, row.cost), ' custo']),
+    el('span', undefined, [el('b', undefined, undefined, row.tokens), ' tokens']),
+    el('span', undefined, [el('b', undefined, undefined, row.tools), ' ferramentas']),
+  ]);
+
+  const body = el('div', 'agent-body', [head, meta, figures]);
+  card.append(avatar, body);
+
+  if (row.canOpen) {
+    const open = el('button', 'agent-open', undefined, strings.labels.open);
+    open.type = 'button';
+    open.addEventListener('click', (event) => {
+      event.stopPropagation();
+      props.onOpenAgent(row.id);
+    });
+    card.append(open);
+    card.addEventListener('click', () => props.onOpenAgent(row.id));
+  }
+
+  return card;
+};
+
+const agents = (snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
+  const rows = agentRows(snapshot);
+  const children = rows.filter((row) => !row.isMain);
+  const content =
+    children.length === 0
+      ? empty(strings.empty.noAgents)
+      : el('div', undefined, children.map((row) => agentCard(row, props)));
+  return section(1, strings.sections.agents, content, children.length);
+};
+
+const turnCard = (row: TurnRow, snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
+  const turn = snapshot.turns.find((entry) => entry.index === row.index);
+  const open = props.expandedTurns.has(row.index);
+  const card = el('div', 'turn-card');
+  const head = el('button', 'turn-head');
+  head.type = 'button';
+  head.setAttribute('aria-expanded', String(open));
+
+  const body = el('div', 'list-main', [
+    el('div', 'turn-request', undefined, row.request),
+    metaList(row.meta),
+  ]);
+
+  head.append(el('span', 'turn-index', undefined, `#${row.index}`), body);
+
+  if (row.running) {
+    const state = el('span', 'turn-state');
+    state.append(el('span', 'status-dot normal'), el('span', undefined, strings.labels.runningTurn));
+    head.append(state);
+  }
+
+  head.append(chevron(open));
+  head.addEventListener('click', () => props.onToggleTurn(row.index));
+  card.append(head);
+
+  if (open && turn) {
+    const agentsText = turn.agents
+      .map((id) => snapshot.agents.find((agent) => agent.id === id)?.title ?? id)
+      .join(', ');
+    const tokens =
+      turn.tokens.input + turn.tokens.output + turn.tokens.reasoning + turn.tokens.cacheRead + turn.tokens.cacheWrite;
+
+    const detail = el('div', 'turn-detail', [
+      el('div', 'detail-item detail-full', [
+        el('div', 'detail-label', undefined, strings.labels.request),
+        el('div', 'detail-value', undefined, turn.request || '—'),
+      ]),
+      el('div', 'detail-item', [
+        el('div', 'detail-label', undefined, strings.labels.tools),
+        el('div', 'detail-value', undefined, `${turn.toolCalls} ferramentas · ${turn.failures} falhas`),
+      ]),
+      el('div', 'detail-item', [
+        el('div', 'detail-label', undefined, strings.labels.agentTree),
+        el('div', 'detail-value', undefined, agentsText || '—'),
+      ]),
+      el('div', 'detail-item', [
+        el('div', 'detail-label', undefined, strings.labels.start),
+        el('div', 'detail-value', undefined, new Date(turn.startedAt).toLocaleTimeString('pt-BR')),
+      ]),
+      el('div', 'detail-item', [
+        el('div', 'detail-label', undefined, strings.labels.tokens),
+        el('div', 'detail-value', undefined, formatTokens(tokens)),
+      ]),
+    ]);
+    card.append(detail);
+  }
+
+  return card;
+};
+
+const turns = (snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
+  const rows = turnRows(snapshot);
+  const content =
+    rows.length === 0
+      ? empty(strings.empty.noTurns)
+      : el('div', undefined, rows.map((row) => turnCard(row, snapshot, props)));
+  return section(1, strings.sections.turns, content, rows.length);
+};
+
+const patchLines = (patch: string): HTMLElement => {
+  const wrap = el('div', 'patch');
+  for (const line of patch.split('\n')) {
+    const kind =
+      line === '…'
+        ? 'meta'
+        : line.startsWith('diff --git') || line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ ')
+          ? 'meta'
+          : line.startsWith('@@')
+            ? 'hunk'
+            : line.startsWith('+')
+              ? 'add'
+              : line.startsWith('-')
+                ? 'del'
+                : 'context';
+    wrap.append(el('div', `patch-line ${kind}`, undefined, line.length > 0 ? line : ' '));
+  }
+  return wrap;
+};
+
+const diffCard = (row: DiffRow, props: PanelProps): HTMLElement => {
+  const open = props.expandedDiffs.has(row.fullPath);
+  const card = el('div', 'diff-card');
+  const head = el('button', 'diff-head');
+  head.type = 'button';
+  head.setAttribute('aria-expanded', String(open));
+
+  const status = el('span', `diff-badge ${row.tone}`, undefined, row.status);
+  const counts = el('span', 'diff-counts', [
+    el('span', 'add', undefined, `+${row.additions}`),
+    el('span', 'del', undefined, `−${row.deletions}`),
+  ]);
+  head.append(
+    el('span', 'diff-path', undefined, row.path),
+    status,
+    counts,
+    chevron(open),
+  );
+  head.addEventListener('click', () => props.onToggleDiff(row.fullPath));
+  card.append(head);
+
+  if (open) {
+    card.append(patchLines(row.patch));
+    if (row.truncated) card.append(el('div', 'truncated', undefined, strings.labels.patchTruncated));
+  }
+  return card;
+};
+
+const diffs = (snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
+  const rows = diffRows(snapshot);
+  const content =
+    rows.length === 0
+      ? empty(strings.empty.noDiff)
+      : el('div', undefined, rows.map((row) => diffCard(row, props)));
+  return section(1, strings.sections.diffs, content, rows.length);
+};
+
 const errorBanner = (props: PanelProps): HTMLElement | null => {
   if (!props.error) return null;
   const copy = errorText(props.error.code);
-  const body = props.snapshot ? `${copy.body} Os números abaixo podem estar desatualizados.` : copy.body;
+  const body = props.snapshot
+    ? `${copy.body} Os números abaixo podem estar desatualizados.`
+    : copy.body;
   return el('div', 'banner error', [
     el('div', 'banner-title', undefined, copy.title),
     el('div', 'banner-body', undefined, body),
   ]);
 };
 
-const overview = (snapshot: LensSnapshot): HTMLElement => {
-  const model = overviewModel(snapshot);
-  const contextCard = el('div', 'card context-card', [
-    ring(model.contextPercent),
-    el('div', 'context-copy', [
-      el('div', 'card-label', undefined, strings.labels.context),
-      el('div', 'context-value', undefined, formatPercent(model.contextPercent)),
-      el(
-        'div',
-        'card-hint',
-        undefined,
-        snapshot.session.context.used === null
-          ? 'sem leitura'
-          : `${formatTokens(snapshot.session.context.used)} de ${formatTokens(snapshot.session.context.limit)}`,
-      ),
-    ]),
-  ]);
-
-  const tokenChips = el('div', 'chips');
-  for (const token of model.tokens) {
-    tokenChips.append(el('span', 'chip', [el('strong', undefined, undefined, token.value), ` ${token.label}`]));
-  }
-
-  const lastTurn = model.lastTurn
-    ? el('div', 'card', [
-        el('div', 'row-title', undefined, model.lastTurn.request),
-        el('div', 'turn-meta', [
-          `#${model.lastTurn.index}`,
-          model.lastTurn.duration,
-          model.lastTurn.cost,
-          model.lastTurn.tools,
-          model.lastTurn.failures,
-        ]),
-      ])
-    : empty(strings.empty.noTurns);
-
-  const recent = model.recentFiles.length
-    ? el(
-        'div',
-        undefined,
-        model.recentFiles.map((file) =>
-          el('div', 'row', [
-            el('div', 'row-main', [
-              el('div', 'file-line', [
-                el('span', 'row-title', undefined, file.path),
-                el('span', 'file-action', undefined, file.action),
-              ]),
-            ]),
-            el('span', 'row-figures', undefined, file.age),
-          ]),
-        ),
-      )
-    : empty(strings.empty.noRecent);
-
-  return el('div', undefined, [
-    contextCard,
-    el('div', 'grid three', model.metrics.filter((metric) => metric.label !== strings.labels.context).map(metricCard)),
-    el('div', 'section', [
-      el('div', 'section-head', [el('span', 'section-title', undefined, strings.labels.tokens)]),
-      tokenChips,
-    ]),
-    el('div', 'section', [
-      el('div', 'section-head', [el('span', 'section-title', undefined, strings.labels.lastTurn)]),
-      lastTurn,
-    ]),
-    el('div', 'section', [
-      el('div', 'section-head', [el('span', 'section-title', undefined, strings.labels.recentFiles)]),
-      recent,
-    ]),
-  ]);
-};
-
-const agentNode = (row: AgentRow, props: PanelProps): HTMLElement => {
-  const node = el('div', `row agent-row ${row.canOpen ? 'clickable' : ''}`, [
-    el('div', 'agent-main', [
-      el('div', 'agent-head', [
-        el('span', 'agent-title', undefined, `${row.isMain ? '◉' : '◈'} ${row.title}`),
-        el('span', `badge ${toneClass(row.tone)}`, undefined, row.status),
-      ]),
-      el('div', 'agent-meta', [
-        row.model,
-        row.cost,
-        `${row.tokens} tokens`,
-        `${row.tools} ferramentas`,
-      ]),
-    ]),
-  ]);
-  node.style.paddingLeft = `${8 + row.depth * 14}px`;
-  if (row.canOpen) {
-    node.setAttribute('role', 'button');
-    node.setAttribute('tabindex', '0');
-    node.title = strings.labels.openSession;
-    node.addEventListener('click', () => props.onOpenAgent(row.id));
-    node.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        props.onOpenAgent(row.id);
-      }
-    });
-  }
-  return node;
-};
-
-const agents = (snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
-  const rows = agentRows(snapshot);
-  if (rows.length === 0) return empty(strings.empty.noAgents);
-  return el(
-    'div',
-    undefined,
-    rows.map((row) => agentNode(row, props)),
-  );
-};
-
-const turns = (snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
-  const rows = turnRows(snapshot);
-  if (rows.length === 0) return empty(strings.empty.noTurns);
-
-  return el(
-    'div',
-    undefined,
-    rows.map((row) => {
-      const turn = snapshot.turns.find((entry) => entry.index === row.index);
-      const isOpen = props.expandedTurns.has(row.index);
-      const card = el('div', 'row turn-card');
-      const head = el('div', 'turn-head', [
-        el('span', 'turn-index', undefined, `#${row.index}`),
-        el('div', 'row-main', [
-          el('div', 'turn-request', undefined, row.request),
-          el('div', 'turn-meta', [
-            row.duration,
-            row.cost,
-            row.tools,
-            row.failures,
-            row.agents > 0 ? `${row.agents} agentes` : null,
-            row.running ? strings.labels.runningTurn : null,
-          ]),
-        ]),
-      ]);
-      head.addEventListener('click', () => props.onToggleTurn(row.index));
-      card.append(head);
-
-      if (isOpen && turn) {
-        card.append(
-          el('div', 'turn-detail', [
-            el('div', 'turn-detail-label', undefined, strings.labels.request),
-            el('div', 'turn-detail-text', undefined, turn.request || '—'),
-            el('div', 'turn-detail-label', undefined, strings.labels.tools),
-            el('div', 'turn-detail-text', undefined, `${turn.toolCalls} ferramentas · ${turn.failures} falhas`),
-            turn.agents.length > 0
-              ? el('div', 'turn-detail-label', undefined, strings.labels.agentTree)
-              : null,
-            turn.agents.length > 0
-              ? el('div', 'turn-detail-text', undefined, turn.agents.join(', '))
-              : null,
-          ]),
-        );
-      }
-
-      return card;
-    }),
-  );
-};
-
-const useLine = (value: string): HTMLElement =>
-  el('pre', 'patch', undefined, value.length > 0 ? value : '—');
-
-const diffs = (snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
-  const rows = diffRows(snapshot);
-  if (rows.length === 0) return empty(strings.empty.noDiff);
-
-  return el(
-    'div',
-    undefined,
-    rows.map((row) => {
-      const card = el('div', 'row diff-row');
-      const head = el('div', 'diff-head', [
-        el('span', `row-title diff-path`, undefined, row.path),
-        el('span', 'row-figures', [
-          el('span', 'add', undefined, `+${row.additions}`),
-          el('span', 'del', undefined, `−${row.deletions}`),
-        ]),
-        el('span', 'file-action', undefined, row.status),
-      ]);
-      head.addEventListener('click', () => props.onToggleDiff(row.fullPath));
-      card.append(head);
-      if (props.expandedDiffs.has(row.fullPath)) {
-        card.append(useLine(row.patch));
-        if (row.truncated) card.append(el('div', 'truncated', undefined, strings.labels.patchTruncated));
-      }
-      return card;
-    }),
-  );
-};
-
 export const renderPanel = (root: HTMLElement, props: PanelProps): void => {
   root.replaceChildren();
+  root.append(header(props));
 
   if (!props.hasSession) {
-    root.append(header(props), empty(strings.empty.noSession, strings.empty.noSessionHint));
+    root.append(empty(strings.empty.noSession, strings.empty.noSessionHint));
     return;
   }
 
-  root.append(header(props), tabs(props));
+  root.append(tabs(props));
   const banner = errorBanner(props);
   if (banner) root.append(banner);
 
-  const snapshot = props.snapshot;
-  if (!snapshot) {
+  if (!props.snapshot) {
     root.append(empty(props.error ? 'Sem dados' : 'Lendo sessão…'));
     return;
   }
 
-  if (props.tab === 'overview') root.append(overview(snapshot));
-  else if (props.tab === 'agents') root.append(agents(snapshot, props));
-  else if (props.tab === 'turns') root.append(turns(snapshot, props));
-  else root.append(diffs(snapshot, props));
+  if (props.tab === 'overview') root.append(overview(props.snapshot));
+  else if (props.tab === 'agents') root.append(agents(props.snapshot, props));
+  else if (props.tab === 'turns') root.append(turns(props.snapshot, props));
+  else root.append(diffs(props.snapshot, props));
 };
