@@ -416,7 +416,7 @@ var discoverBaseUrl = async ({ dataDir, explicit }) => {
   const runDir = path.join(dataDir, "run");
   let files = [];
   try {
-    files = (await readdir(runDir)).filter((file) => file.endsWith(".json"));
+    files = (await readdir(runDir)).filter((file) => file.startsWith("openchamber-") && file.endsWith(".json"));
   } catch {
     return null;
   }

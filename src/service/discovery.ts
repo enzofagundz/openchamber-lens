@@ -51,7 +51,9 @@ export const discoverBaseUrl = async ({ dataDir, explicit }: DiscoveryInput): Pr
   const runDir = path.join(dataDir, 'run');
   let files: string[] = [];
   try {
-    files = (await readdir(runDir)).filter((file) => file.endsWith('.json'));
+    files = (await readdir(runDir)).filter(
+      (file) => file.startsWith('openchamber-') && file.endsWith('.json'),
+    );
   } catch {
     return null;
   }
