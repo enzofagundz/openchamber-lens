@@ -1,0 +1,45 @@
+{
+  "name": "opencode-lens",
+  "version": "0.1.0",
+  "description": "Session observability panel for OpenChamber",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.3.3"
+    },
+    "contributes": {
+      "panel": {
+        "id": "lens",
+        "name": "Lens",
+        "icon": "radar",
+        "entry": "panel/index.html"
+      },
+      "statusSection": {
+        "entry": "status/index.html",
+        "title": "Lens",
+        "height": 76
+      },
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": {}
+      },
+      "capabilities": ["sessions"]
+    }
+  },
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run typecheck && bun test && bun run build",
+    "dev:panel": "bun run scripts/build.ts"
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "2.4.0",
+    "@types/bun": "^1.3.14",
+    "typescript": "^5.9.2"
+  }
+}

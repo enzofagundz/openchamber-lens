@@ -1,0 +1,96 @@
+export const strings = {
+  app: 'Lens',
+  tabs: {
+    overview: 'Visão geral',
+    agents: 'Agentes',
+    turns: 'Turnos',
+    diffs: 'Diffs',
+  },
+  empty: {
+    noSession: 'Nenhuma sessão aberta.',
+    noSessionHint: 'Abra uma conversa para o Lens acompanhar.',
+    noTurns: 'Nenhum turno nesta sessão.',
+    noAgents: 'Nenhum subagente nesta sessão.',
+    noDiff: 'Nenhum arquivo alterado nesta sessão.',
+    noRecent: 'Nenhum arquivo tocado ainda.',
+  },
+  labels: {
+    context: 'Contexto',
+    cost: 'Custo da sessão',
+    tokens: 'Tokens',
+    input: 'Entrada',
+    output: 'Saída',
+    reasoning: 'Raciocínio',
+    cacheRead: 'Cache lido',
+    cacheWrite: 'Cache escrito',
+    model: 'Modelo',
+    agent: 'Agente',
+    status: 'Status',
+    tools: 'Ferramentas',
+    failures: 'Falhas',
+    files: 'Arquivos',
+    lastTurn: 'Último turno',
+    recentFiles: 'Arquivos recentes',
+    duration: 'Duração',
+    request: 'Pedido',
+    working: 'Trabalhando',
+    idle: 'Parada',
+    unknown: '—',
+    agentTree: 'Quem chamou quem',
+    openSession: 'Abrir sessão',
+    patchTruncated: 'Patch truncado para manter o painel rápido.',
+    runningTurn: 'Em andamento',
+  },
+  status: {
+    running: 'rodando',
+    completed: 'concluído',
+    failed: 'falhou',
+    unknown: '—',
+  },
+  errors: {
+    'no-server': {
+      title: 'Servidor local não encontrado',
+      body: 'Abra o OpenChamber no desktop ou inicie um `openchamber serve` local.',
+    },
+    'auth-required': {
+      title: 'Instância autenticada não suportada',
+      body: 'O Lens só lê o servidor local sem senha. Instâncias remotas ou protegidas por senha ficam de fora nesta versão.',
+    },
+    'upstream-failed': {
+      title: 'Falha ao ler a sessão',
+      body: 'O servidor local respondeu com erro. O Lens tenta de novo no próximo ciclo.',
+    },
+    'bad-answer': {
+      title: 'Resposta inesperada',
+      body: 'O servidor local devolveu dados fora do formato esperado.',
+    },
+    'session-not-found': {
+      title: 'Sessão não encontrada',
+      body: 'A sessão aberta não está mais disponível no servidor local.',
+    },
+    paused: {
+      title: 'Lens pausado',
+      body: 'Ative o Lens em Configurações → Extensões.',
+    },
+    'needs-approval': {
+      title: 'Serviço local bloqueado',
+      body: 'Permita o serviço local do Lens em Configurações → Extensões.',
+    },
+    'service-failed': {
+      title: 'Serviço local parou',
+      body: 'O serviço reinicia no próximo ciclo do painel.',
+    },
+    unreachable: {
+      title: 'Serviço local inacessível',
+      body: 'Não foi possível falar com o serviço do Lens.',
+    },
+  },
+} as const;
+
+export type ErrorCode = keyof typeof strings.errors;
+
+export const errorText = (code: string): { title: string; body: string } =>
+  strings.errors[code as ErrorCode] ?? {
+    title: 'Falha no Lens',
+    body: `Código: ${code}`,
+  };
