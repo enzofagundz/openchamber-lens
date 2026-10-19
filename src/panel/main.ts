@@ -1,7 +1,8 @@
-import { connectHost, HostRequestError } from '@openchamber/sdk';
+import { connectHost } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 
 import type { LensError, LensSnapshot } from '../shared/types.ts';
+import { requestSnapshot } from './client.ts';
 import { renderPanel, type PanelTab } from './render.ts';
 
 const host = connectHost();
@@ -10,7 +11,6 @@ if (!root) throw new Error('Missing #root');
 
 let mounted = false;
 let sessionId: string | null = null;
-let directory: string | null = null;
 let snapshot: LensSnapshot | null = null;
 let error: LensError | null = null;
 let tab: PanelTab = 'overview';
@@ -19,20 +19,6 @@ const expandedTurns = new Set<number>();
 const expandedDiffs = new Set<string>();
 
 const visible = (): boolean => !document.hidden && root.getBoundingClientRect().width > 0;
-
-const hostError = (value: unknown): LensError => {
-  if (value instanceof HostRequestError) {
-    if (value.code === 'NO_SERVICE' || value.code === 'NOT_GRANTED') {
-      return { code: 'needs-approval', message: value.message };
-    }
-    if (value.code === 'DISABLED') return { code: 'paused', message: value.message };
-    if (value.code === 'SERVICE_FAILED') return { code: 'service-failed', message: value.message };
-  }
-  return {
-    code: 'unreachable',
-    message: value instanceof Error ? value.message : 'Serviço local inacessível.',
-  };
-};
 
 const render = (): void => {
   if (!mounted) return;
@@ -77,25 +63,14 @@ const poll = async (): Promise<void> => {
   const wanted = sessionId;
   inFlight = true;
   try {
-    const result = await host.serviceRequest({
-      method: 'GET',
-      path: '/snapshot',
-      query: { sessionId: wanted, ...(directory ? { directory } : {}) },
-    });
+    const result = await requestSnapshot(host, wanted);
     if (sessionId !== wanted) return;
-    let body: { data?: LensSnapshot | null; error?: LensError | null } = {};
-    try {
-      body = JSON.parse(result.body) as typeof body;
-    } catch {
-      error = { code: 'bad-answer', message: 'Resposta do serviço não é JSON.' };
-      render();
-      return;
+    if (result.data) {
+      snapshot = result.data;
+      error = null;
+    } else {
+      error = result.error ?? { code: 'bad-answer', message: 'Sem dados do serviço.' };
     }
-    if (body.data) snapshot = body.data;
-    error = body.error ?? null;
-    render();
-  } catch (value) {
-    error = hostError(value);
     render();
   } finally {
     inFlight = false;
@@ -127,18 +102,12 @@ const mount = (): void => {
 
 host.onReady((ctx) => {
   applyHostReady(ctx, document.documentElement);
-  directory = ctx.directory;
   mount();
   setSession(ctx.session);
 });
 
 host.onSession((next) => {
   setSession(next);
-});
-
-host.onDirectory((next) => {
-  directory = next;
-  if (sessionId) void poll();
 });
 
 host.onSessionLifecycle((event) => {

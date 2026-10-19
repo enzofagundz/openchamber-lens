@@ -1,8 +1,8 @@
 import { HostRequestError, type HostClient } from '@openchamber/sdk';
 
-import type { SnapshotResponse, StripResponse } from '../shared/types.ts';
+import type { LensError, SnapshotResponse, StripResponse } from '../shared/types.ts';
 
-export type Failure = { code: string; message: string };
+export type Failure = LensError;
 
 export const failureOf = (error: unknown): Failure => {
   if (error instanceof HostRequestError) {

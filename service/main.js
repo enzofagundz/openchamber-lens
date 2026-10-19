@@ -543,6 +543,7 @@ class UpstreamClient {
   activeCache = null;
   modelCache = null;
   messageCache = new Map;
+  conversationCache = new Map;
   diffCache = new Map;
   constructor(baseUrl, fetchImpl = fetch, now = Date.now) {
     this.baseUrl = baseUrl;
@@ -632,6 +633,31 @@ class UpstreamClient {
     this.messageCache.set(key, { value: messages, at: current });
     return messages;
   }
+  async getConversation(id, maxPages = 5) {
+    const current = this.now();
+    const cached = this.conversationCache.get(id);
+    if (cached && current - cached.at < TTL.messages)
+      return cached.value;
+    const collected = new Map;
+    let cursor;
+    for (let page = 0;page < maxPages; page += 1) {
+      const envelope = await this.raw(`/api/session/${encodeURIComponent(id)}/message`, {
+        limit: "200",
+        ...cursor ? { cursor } : {}
+      });
+      const rows = Array.isArray(envelope.data) ? envelope.data : [];
+      for (const message of rows) {
+        if (message && typeof message.id === "string")
+          collected.set(message.id, message);
+      }
+      cursor = envelope.cursor?.next;
+      if (!cursor || rows.length === 0)
+        break;
+    }
+    const messages = [...collected.values()].sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0));
+    this.conversationCache.set(id, { value: messages, at: current });
+    return messages;
+  }
   async getDiff(id) {
     const current = this.now();
     const cached = this.diffCache.get(id);
@@ -669,6 +695,7 @@ class UpstreamClient {
     this.activeCache = null;
     if (!sessionId) {
       this.messageCache.clear();
+      this.conversationCache.clear();
       this.diffCache.clear();
       return;
     }
@@ -676,6 +703,7 @@ class UpstreamClient {
       if (key.startsWith(`${sessionId}:`))
         this.messageCache.delete(key);
     }
+    this.conversationCache.delete(sessionId);
     this.diffCache.delete(sessionId);
   }
 }
@@ -752,7 +780,7 @@ var createLensService = (config) => {
     return upstream;
   };
   const loadMessages = async (client, session, sessions, limit) => {
-    const messages = await soft(client.getMessages(session.id, limit), []);
+    const messages = limit < 200 ? await soft(client.getMessages(session.id, limit), []) : await soft(client.getConversation(session.id), []);
     const result = { [session.id]: messages };
     if (limit < 200)
       return result;

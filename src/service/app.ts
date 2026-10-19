@@ -121,7 +121,10 @@ export const createLensService = (config: LensServiceConfig): LensService => {
     sessions: RawSession[],
     limit: number,
   ): Promise<Record<string, RawMessage[]>> => {
-    const messages = await soft(client.getMessages(session.id, limit), []);
+    const messages =
+      limit < 200
+        ? await soft(client.getMessages(session.id, limit), [])
+        : await soft(client.getConversation(session.id), []);
     const result: Record<string, RawMessage[]> = { [session.id]: messages };
     if (limit < 200) return result;
 

@@ -41,6 +41,7 @@ export class UpstreamClient {
   private activeCache: CacheEntry<RawActive> | null = null;
   private modelCache: CacheEntry<RawModel[]> | null = null;
   private messageCache = new Map<string, CacheEntry<RawMessage[]>>();
+  private conversationCache = new Map<string, CacheEntry<RawMessage[]>>();
   private diffCache = new Map<string, CacheEntry<RawDiff[]>>();
 
   constructor(
@@ -141,6 +142,41 @@ export class UpstreamClient {
     return messages;
   }
 
+  /**
+   * Reads enough pages to include the beginning of the oldest visible turn.
+   * The endpoint returns newest-first pages; `cursor.next` walks to older pages.
+   */
+  async getConversation(id: string, maxPages = 5): Promise<RawMessage[]> {
+    const current = this.now();
+    const cached = this.conversationCache.get(id);
+    if (cached && current - cached.at < TTL.messages) return cached.value;
+
+    const collected = new Map<string, RawMessage>();
+    let cursor: string | undefined;
+
+    for (let page = 0; page < maxPages; page += 1) {
+      const envelope = await this.raw<Envelope<RawMessage[]>>(
+        `/api/session/${encodeURIComponent(id)}/message`,
+        {
+          limit: '200',
+          ...(cursor ? { cursor } : {}),
+        },
+      );
+      const rows = Array.isArray(envelope.data) ? envelope.data : [];
+      for (const message of rows) {
+        if (message && typeof message.id === 'string') collected.set(message.id, message);
+      }
+      cursor = envelope.cursor?.next;
+      if (!cursor || rows.length === 0) break;
+    }
+
+    const messages = [...collected.values()].sort(
+      (a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0),
+    );
+    this.conversationCache.set(id, { value: messages, at: current });
+    return messages;
+  }
+
   async getDiff(id: string): Promise<RawDiff[]> {
     const current = this.now();
     const cached = this.diffCache.get(id);
@@ -177,12 +213,14 @@ export class UpstreamClient {
     this.activeCache = null;
     if (!sessionId) {
       this.messageCache.clear();
+      this.conversationCache.clear();
       this.diffCache.clear();
       return;
     }
     for (const key of this.messageCache.keys()) {
       if (key.startsWith(`${sessionId}:`)) this.messageCache.delete(key);
     }
+    this.conversationCache.delete(sessionId);
     this.diffCache.delete(sessionId);
   }
 }

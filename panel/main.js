@@ -1722,6 +1722,53 @@ ${tone("success")}${tone("warning")}${tone("error")}${tone("info")}
 ${GUEST_SCROLLBAR_CSS}
 ${UI_SIZE_CSS}
 ${GUEST_UI_LOOK_CSS}`;
+  // src/panel/client.ts
+  var failureOf = (error) => {
+    if (error instanceof HostRequestError) {
+      switch (error.code) {
+        case "NO_SERVICE":
+        case "NOT_GRANTED":
+          return { code: "needs-approval", message: error.message };
+        case "DISABLED":
+          return { code: "paused", message: error.message };
+        case "SERVICE_FAILED":
+          return { code: "service-failed", message: error.message };
+        case "HOST_UNAVAILABLE":
+        case "HOST_TIMEOUT":
+        case "DISCONNECTED":
+          return { code: "unreachable", message: error.message };
+        default:
+          return { code: "unreachable", message: error.message };
+      }
+    }
+    return { code: "unreachable", message: error instanceof Error ? error.message : "Falha inesperada." };
+  };
+  var parse = (body) => {
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed.error)
+        return { data: null, error: parsed.error };
+      if (parsed.data === null || parsed.data === undefined) {
+        return { data: null, error: { code: "bad-answer", message: "Resposta sem dados." } };
+      }
+      return { data: parsed.data, error: null };
+    } catch {
+      return { data: null, error: { code: "bad-answer", message: "Resposta não é JSON." } };
+    }
+  };
+  var requestSnapshot = async (host, sessionId) => {
+    try {
+      const result = await host.serviceRequest({
+        method: "GET",
+        path: "/snapshot",
+        query: { sessionId }
+      });
+      return parse(result.body);
+    } catch (error) {
+      return { data: null, error: failureOf(error) };
+    }
+  };
+
   // src/shared/format.ts
   var formatTokens = (value) => {
     if (value === null || value === undefined || !Number.isFinite(value))
@@ -2287,7 +2334,6 @@ ${GUEST_UI_LOOK_CSS}`;
     throw new Error("Missing #root");
   var mounted = false;
   var sessionId = null;
-  var directory = null;
   var snapshot = null;
   var error = null;
   var tab = "overview";
@@ -2295,21 +2341,6 @@ ${GUEST_UI_LOOK_CSS}`;
   var expandedTurns = new Set;
   var expandedDiffs = new Set;
   var visible = () => !document.hidden && root.getBoundingClientRect().width > 0;
-  var hostError = (value) => {
-    if (value instanceof HostRequestError) {
-      if (value.code === "NO_SERVICE" || value.code === "NOT_GRANTED") {
-        return { code: "needs-approval", message: value.message };
-      }
-      if (value.code === "DISABLED")
-        return { code: "paused", message: value.message };
-      if (value.code === "SERVICE_FAILED")
-        return { code: "service-failed", message: value.message };
-    }
-    return {
-      code: "unreachable",
-      message: value instanceof Error ? value.message : "Serviço local inacessível."
-    };
-  };
   var render = () => {
     if (!mounted)
       return;
@@ -2359,27 +2390,15 @@ ${GUEST_UI_LOOK_CSS}`;
     const wanted = sessionId;
     inFlight = true;
     try {
-      const result = await host.serviceRequest({
-        method: "GET",
-        path: "/snapshot",
-        query: { sessionId: wanted, ...directory ? { directory } : {} }
-      });
+      const result = await requestSnapshot(host, wanted);
       if (sessionId !== wanted)
         return;
-      let body = {};
-      try {
-        body = JSON.parse(result.body);
-      } catch {
-        error = { code: "bad-answer", message: "Resposta do serviço não é JSON." };
-        render();
-        return;
+      if (result.data) {
+        snapshot = result.data;
+        error = null;
+      } else {
+        error = result.error ?? { code: "bad-answer", message: "Sem dados do serviço." };
       }
-      if (body.data)
-        snapshot = body.data;
-      error = body.error ?? null;
-      render();
-    } catch (value) {
-      error = hostError(value);
       render();
     } finally {
       inFlight = false;
@@ -2414,17 +2433,11 @@ ${GUEST_UI_LOOK_CSS}`;
   };
   host.onReady((ctx) => {
     applyHostReady(ctx, document.documentElement);
-    directory = ctx.directory;
     mount();
     setSession(ctx.session);
   });
   host.onSession((next) => {
     setSession(next);
-  });
-  host.onDirectory((next) => {
-    directory = next;
-    if (sessionId)
-      poll();
   });
   host.onSessionLifecycle((event) => {
     if (event.sessionId === sessionId)
