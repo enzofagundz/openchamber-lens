@@ -22,12 +22,20 @@
         "title": "Lens",
         "height": 76
       },
+      "commands": [
+        {
+          "name": "lens",
+          "description": "Abre o painel Lens"
+        }
+      ],
       "service": {
         "entry": "service/main.js",
         "runtime": "host",
         "permissions": {}
       },
-      "capabilities": ["sessions"]
+      "capabilities": [
+        "sessions"
+      ]
     }
   },
   "scripts": {

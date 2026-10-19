@@ -1,4 +1,5 @@
 import http from 'node:http';
+import path from 'node:path';
 
 import { buildSnapshot, buildStrip, deriveDiff, deriveTurnDiff, descendantSessions } from '../shared/derive.ts';
 import type {
@@ -6,8 +7,15 @@ import type {
   LensError,
   LensErrorCode,
   LensGitDiff,
+  LensHistoryPoint,
+  LensInventory,
+  LensInventoryItem,
+  LensInventorySection,
+  LensTree,
+  LensTreeEntry,
   RawActive,
   RawDiff,
+  RawFsList,
   RawGitStatus,
   RawMessage,
   RawModel,
@@ -15,14 +23,16 @@ import type {
   SnapshotResponse,
   StripResponse,
 } from '../shared/types.ts';
-import { defaultDataDir, discoverBaseUrl } from './discovery.ts';
+import { defaultDataDir, discoverServer } from './discovery.ts';
 import { EventStream } from './events.ts';
+import { HistoryStore } from './history.ts';
 import { UpstreamClient, UpstreamError, type FetchLike } from './upstream.ts';
 
 export type LensServiceConfig = {
   port: number;
   token: string;
   dataDir?: string;
+  historyDir?: string;
   host?: string;
   baseUrl?: string | null;
   fetchImpl?: FetchLike;
@@ -42,7 +52,25 @@ export type LensService = {
 const MAX_CHILD_MESSAGES = 12;
 const MESSAGES_FOR_STRIP = 20;
 const GIT_FILE_LIMIT = 100;
+const TREE_ENTRY_LIMIT = 500;
+const INVENTORY_TTL = 30_000;
 const BODY_LIMIT = 16_384;
+const TREE_IGNORED = new Set([
+  '.git',
+  '.openchamber',
+  '.opencode',
+  '.scratch',
+  'node_modules',
+  '.next',
+  '.nuxt',
+  '.svelte-kit',
+  '.venv',
+  'venv',
+  '__pycache__',
+  'target',
+  'coverage',
+  '.cache',
+]);
 
 const errorOf = (code: LensErrorCode, message: string): LensError => ({ code, message });
 
@@ -89,6 +117,8 @@ export const createLensService = (config: LensServiceConfig): LensService => {
   const now = config.now ?? Date.now;
   const host = config.host ?? '127.0.0.1';
   const dataDir = config.dataDir ?? defaultDataDir();
+  const history = new HistoryStore(config.historyDir ?? path.join(dataDir, 'lens-history'), now);
+  let inventoryCache: { at: number; data: LensInventory } | null = null;
   let upstream: UpstreamClient | null = null;
   let events: EventStream | null = null;
   let baseUrl: string | null = null;
@@ -118,33 +148,35 @@ export const createLensService = (config: LensServiceConfig): LensService => {
   const resolveUpstream = async (): Promise<UpstreamClient> => {
     if (upstream && now() - baseAt < 5_000) return upstream;
 
-    const discovered = await discoverBaseUrl({
+    const discovered = await discoverServer({
       dataDir,
       explicit: config.baseUrl ?? null,
     });
     if (!discovered) throw new UpstreamError('no-server', 'Servidor local do OpenChamber não encontrado.');
 
-    if (upstream && baseUrl === discovered) {
+    if (upstream && baseUrl === discovered.baseUrl) {
       baseAt = now();
       return upstream;
     }
 
     events?.stop();
-    baseUrl = discovered;
+    baseUrl = discovered.baseUrl;
     baseAt = now();
-    upstream = new UpstreamClient(discovered, config.fetchImpl, now);
+    const client = new UpstreamClient(discovered.baseUrl, config.fetchImpl, now, discovered.auth);
+    upstream = client;
     if (config.sse !== false) {
       events = new EventStream(
-        discovered,
+        discovered.baseUrl,
         (event) => {
           const sessionId = typeof event.data?.sessionID === 'string' ? event.data.sessionID : undefined;
-          upstream?.invalidate(sessionId);
+          client.invalidate(sessionId);
         },
         config.fetchImpl,
+        () => client.authHeaders(),
       );
       events.start();
     }
-    return upstream;
+    return client;
   };
 
   const loadMessages = async (
@@ -200,6 +232,7 @@ export const createLensService = (config: LensServiceConfig): LensService => {
     });
 
     if (strip) return { data: buildStrip(snapshot), error: null };
+    await history.record(snapshot).catch(() => undefined);
     return { data: snapshot, error: null };
   };
 
@@ -273,6 +306,166 @@ export const createLensService = (config: LensServiceConfig): LensService => {
     return { data: deriveTurnDiff(messages, turn), error: null };
   };
 
+  const tree = async (sessionId: string, requested: string | null): Promise<{ data: LensTree | null; error: LensError | null }> => {
+    const client = await resolveUpstream();
+    const session = await client.getSession(sessionId);
+    const directory = session.location?.directory;
+    if (!directory) throw new UpstreamError('bad-answer', 'Sessão sem diretório de projeto.');
+
+    const root = path.resolve(directory);
+    const target = requested ? path.resolve(root, requested) : root;
+    if (target !== root && !target.startsWith(`${root}${path.sep}`)) {
+      throw new UpstreamError('bad-answer', 'Caminho fora do projeto.');
+    }
+
+    const listing: RawFsList = await client.getFsList(target);
+    const gitFiles = new Map<string, string>();
+    try {
+      const status = await client.getGitStatus(directory);
+      for (const file of status.files ?? []) {
+        if (!file.path) continue;
+        const mark = file.working_dir && file.working_dir !== ' ' && file.working_dir !== '?'
+          ? file.working_dir
+          : file.index;
+        if (mark && mark !== ' ' && mark !== '?') gitFiles.set(file.path, mark);
+      }
+    } catch {
+      // A project without Git still gets a tree, just without status marks.
+    }
+
+    const entries: LensTreeEntry[] = (listing.entries ?? [])
+      .filter((entry) => typeof entry.name === 'string' && typeof entry.path === 'string')
+      .filter((entry) => !TREE_IGNORED.has(entry.name as string))
+      .slice(0, TREE_ENTRY_LIMIT)
+      .map((entry) => {
+        const absolute = entry.path as string;
+        const relative = path.relative(root, absolute) || '.';
+        const kind = entry.isDirectory
+          ? 'directory'
+          : entry.isSymbolicLink
+            ? 'symlink'
+            : 'file';
+        return {
+          name: entry.name as string,
+          path: absolute,
+          relative,
+          kind,
+          touched: false,
+          ...(gitFiles.has(relative) ? { gitStatus: gitFiles.get(relative) } : {}),
+        } as LensTreeEntry;
+      })
+      .sort((a, b) => {
+        if ((a.kind === 'directory') !== (b.kind === 'directory')) return a.kind === 'directory' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+    return {
+      data: {
+        path: path.relative(root, target) || '.',
+        root,
+        entries,
+      },
+      error: null,
+    };
+  };
+
+  const inventory = async (sessionId: string): Promise<{ data: LensInventory | null; error: LensError | null }> => {
+    const client = await resolveUpstream();
+    const session = await client.getSession(sessionId);
+    const directory = session.location?.directory ?? undefined;
+    const query = directory ? { directory } : undefined;
+
+    if (inventoryCache && now() - inventoryCache.at < INVENTORY_TTL) {
+      return { data: inventoryCache.data, error: null };
+    }
+
+    const [agents, commands, skills, plugins, mcp] = await Promise.all([
+      soft(client.getData<unknown[]>('/api/agent', query), []),
+      soft(client.getData<unknown[]>('/api/command', query), []),
+      soft(client.getData<unknown[]>('/api/skill', query), []),
+      soft(client.getData<unknown[]>('/api/plugin', query), []),
+      soft(client.getData<unknown[]>('/api/mcp', query), []),
+    ]);
+
+    const rows = (value: unknown[]): Array<Record<string, unknown>> =>
+      value.filter((entry): entry is Record<string, unknown> => recordOf(entry) !== null);
+
+    const item = (
+      name: string,
+      description: string,
+      meta: string,
+      status: string,
+      tone: LensInventoryItem['tone'] = 'muted',
+    ): LensInventoryItem => ({ name, description, meta, status, tone });
+
+    const agentItems = rows(agents)
+      .filter((entry) => entry.hidden !== true)
+      .slice(0, 200)
+      .map((entry) => {
+        const model = recordOf(entry.model);
+        const modelName = model ? `${text(model.providerID)}/${text(model.id)}` : '';
+        return item(
+          text(entry.name) || text(entry.id) || '—',
+          text(entry.description),
+          `${text(entry.mode)}${modelName ? ` · ${modelName}` : ''}`,
+          'disponível',
+          'normal',
+        );
+      });
+
+    const commandItems = rows(commands)
+      .slice(0, 200)
+      .map((entry) => item(text(entry.name) || '—', text(entry.description), 'comando', 'disponível', 'normal'));
+
+    const skillItems = rows(skills)
+      .slice(0, 200)
+      .map((entry) => item(text(entry.name) || text(entry.id) || '—', text(entry.description), text(entry.path), 'disponível', 'muted'));
+
+    const pluginItems = rows(plugins)
+      .slice(0, 200)
+      .map((entry) => {
+        const source = recordOf(entry.source);
+        const state = recordOf(entry.state);
+        const status = text(state?.status) || '—';
+        return item(
+          text(entry.id) || '—',
+          '',
+          text(source?.type),
+          status,
+          status === 'active' || status === 'enabled' ? 'normal' : 'muted',
+        );
+      });
+
+    const mcpItems = rows(mcp)
+      .slice(0, 200)
+      .map((entry) => {
+        const status = recordOf(entry.status);
+        const state = text(status?.status) || '—';
+        const error = text(status?.error);
+        return item(
+          text(entry.name) || '—',
+          error,
+          'MCP',
+          state,
+          state === 'failed' ? 'danger' : state === 'connected' ? 'normal' : 'muted',
+        );
+      });
+
+    const sections: LensInventorySection[] = [
+      { id: 'agents', label: 'Agentes', count: agentItems.length, items: agentItems },
+      { id: 'commands', label: 'Comandos', count: commandItems.length, items: commandItems },
+      { id: 'skills', label: 'Skills', count: skillItems.length, items: skillItems },
+      { id: 'mcp', label: 'MCP', count: mcpItems.length, items: mcpItems },
+      { id: 'plugins', label: 'Plugins', count: pluginItems.length, items: pluginItems },
+    ];
+
+    const data = { sections };
+    inventoryCache = { at: now(), data };
+    return { data, error: null };
+  };
+
+  const text = (value: unknown): string => (typeof value === 'string' ? value : '');
+
   const interrupt = async (
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -322,6 +515,17 @@ export const createLensService = (config: LensServiceConfig): LensService => {
       return;
     }
 
+    if (req.method === 'DELETE' && url.pathname === '/history') {
+      const sessionId = url.searchParams.get('sessionId')?.trim();
+      if (!sessionId) {
+        send(res, 400, { data: null, error: errorOf('bad-answer', 'sessionId é obrigatório.') });
+        return;
+      }
+      await history.clear(sessionId);
+      send(res, 200, { data: { cleared: true }, error: null });
+      return;
+    }
+
     if (req.method !== 'GET') {
       send(res, 405, { data: null, error: errorOf('bad-answer', 'Método não permitido.') });
       return;
@@ -332,7 +536,7 @@ export const createLensService = (config: LensServiceConfig): LensService => {
       return;
     }
 
-    const supported = new Set(['/snapshot', '/strip', '/git-diff', '/turn-diff']);
+    const supported = new Set(['/snapshot', '/strip', '/git-diff', '/turn-diff', '/history', '/tree', '/inventory']);
     if (!supported.has(url.pathname)) {
       send(res, 404, { data: null, error: errorOf('bad-answer', 'Rota desconhecida.') });
       return;
@@ -356,6 +560,22 @@ export const createLensService = (config: LensServiceConfig): LensService => {
           return;
         }
         send(res, 200, await turnDiff(sessionId, turn));
+        return;
+      }
+      if (url.pathname === '/history') {
+        const limit = Number(url.searchParams.get('limit') ?? '500');
+        send(res, 200, {
+          data: await history.read(sessionId, Number.isFinite(limit) ? limit : 500),
+          error: null,
+        });
+        return;
+      }
+      if (url.pathname === '/tree') {
+        send(res, 200, await tree(sessionId, url.searchParams.get('path')));
+        return;
+      }
+      if (url.pathname === '/inventory') {
+        send(res, 200, await inventory(sessionId));
         return;
       }
       const result = await build(sessionId, url.pathname === '/strip');

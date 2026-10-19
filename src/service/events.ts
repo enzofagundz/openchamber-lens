@@ -18,6 +18,7 @@ export class EventStream {
     private readonly baseUrl: string,
     private readonly onEvent: (event: UpstreamEvent) => void,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly authHeaders: () => Promise<Record<string, string>> = async () => ({}),
   ) {}
 
   start(): void {
@@ -52,7 +53,7 @@ export class EventStream {
     try {
       const response = await this.fetchImpl(new URL('/api/event', this.baseUrl), {
         method: 'GET',
-        headers: { accept: 'text/event-stream' },
+        headers: { accept: 'text/event-stream', ...(await this.authHeaders()) },
         signal: controller.signal,
       });
       if (!response.ok || !response.body) throw new Error(`SSE ${response.status}`);

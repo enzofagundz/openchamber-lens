@@ -76,6 +76,52 @@ export type LensGitDiff = {
   files: LensDiffFile[];
 };
 
+export type LensTreeEntry = {
+  name: string;
+  path: string;
+  relative: string;
+  kind: 'directory' | 'file' | 'symlink';
+  touched: boolean;
+  gitStatus?: string;
+};
+
+export type LensTree = {
+  path: string;
+  root: string;
+  entries: LensTreeEntry[];
+};
+
+export type LensInventoryItem = {
+  name: string;
+  description: string;
+  meta: string;
+  status: string;
+  tone: 'normal' | 'warning' | 'danger' | 'muted';
+};
+
+export type LensInventorySection = {
+  id: string;
+  label: string;
+  count: number;
+  items: LensInventoryItem[];
+};
+
+export type LensInventory = {
+  sections: LensInventorySection[];
+};
+
+export type LensHistoryPoint = {
+  at: number;
+  cost: number;
+  contextPercent: number | null;
+  contextUsed: number | null;
+  toolCalls: number;
+  failures: number;
+  turns: number;
+  filesChanged: number;
+  runningAgents: number;
+};
+
 export type LensRecentFile = {
   path: string;
   action: 'read' | 'edit';
@@ -232,6 +278,19 @@ export type RawGitStatus = {
 export type RawGitDiff = {
   diff?: string;
   submodule?: unknown;
+};
+
+export type RawFsEntry = {
+  name?: string;
+  path?: string;
+  isDirectory?: boolean;
+  isFile?: boolean;
+  isSymbolicLink?: boolean;
+};
+
+export type RawFsList = {
+  path?: string;
+  entries?: RawFsEntry[];
 };
 
 export type RawModel = {

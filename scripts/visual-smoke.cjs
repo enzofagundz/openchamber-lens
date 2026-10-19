@@ -34,9 +34,10 @@ const findStatus = (page) => page.frames().find((frame) => frame.url().includes(
 const openLens = async (page, id) => {
   await page.goto(`${APP}/?session=${encodeURIComponent(id)}`, { waitUntil: 'domcontentloaded', timeout: 20_000 });
   await page.waitForTimeout(3_500);
-  if (!findPanel(page)) {
-    await page.click('button[aria-label="Lens"]');
-    await page.waitForTimeout(2_500);
+  for (let attempt = 0; attempt < 3 && !findPanel(page); attempt += 1) {
+    const button = page.locator('button[aria-label="Lens"]');
+    if (await button.count()) await button.first().click();
+    await page.waitForTimeout(3_000);
   }
   const panel = findPanel(page);
   assert.ok(panel, 'Lens panel frame did not open');
@@ -67,7 +68,7 @@ const checkPanel = async (panel, width) => {
     };
   });
 
-  assert.equal(metrics.tabs, 4, `expected 4 tabs at ${width}px`);
+  assert.equal(metrics.tabs, 6, `expected 6 tabs at ${width}px`);
   assert.ok(metrics.cards >= 6, `expected at least 6 stat cards at ${width}px`);
   assert.equal(metrics.contextBar, 1, `expected a context bar at ${width}px`);
   assert.equal(metrics.overflow, false, `root overflows at ${width}px`);

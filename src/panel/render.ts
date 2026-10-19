@@ -1,6 +1,11 @@
-import { formatTokens } from '../shared/format.ts';
+import { formatPercent, formatTokens, formatUsd } from '../shared/format.ts';
 import { strings, errorText } from '../shared/strings.ts';
-import type { LensSnapshot } from '../shared/types.ts';
+import type {
+  LensHistoryPoint,
+  LensInventory,
+  LensSnapshot,
+  LensTreeEntry,
+} from '../shared/types.ts';
 import {
   agentRows,
   diffRows,
@@ -15,7 +20,7 @@ import {
 } from '../shared/view.ts';
 import { el } from './dom.ts';
 
-export type PanelTab = 'overview' | 'agents' | 'turns' | 'diffs';
+export type PanelTab = 'overview' | 'agents' | 'turns' | 'diffs' | 'tree' | 'inventory';
 export type DiffSource = 'session' | 'turn' | 'git';
 
 export type DiffView = {
@@ -28,6 +33,26 @@ export type DiffView = {
   error: string | null;
 };
 
+export type TreeView = {
+  root: string | null;
+  entries: Record<string, LensTreeEntry[]>;
+  expanded: ReadonlySet<string>;
+  loading: boolean;
+  error: string | null;
+};
+
+export type InventoryView = {
+  data: LensInventory | null;
+  loading: boolean;
+  error: string | null;
+  filter: string;
+};
+
+export type HistoryView = {
+  points: LensHistoryPoint[];
+  error: string | null;
+};
+
 export type PanelProps = {
   snapshot: LensSnapshot | null;
   error: { code: string; message: string } | null;
@@ -36,6 +61,13 @@ export type PanelProps = {
   expandedTurns: ReadonlySet<number>;
   expandedDiffs: ReadonlySet<string>;
   diffView: DiffView;
+  tree: TreeView;
+  inventory: InventoryView;
+  history: HistoryView;
+  brlRate: number;
+  settingsOpen: boolean;
+  brlInput: string;
+  confirmingClear: boolean;
   stoppingAgents: ReadonlySet<string>;
   confirmingStop: string | null;
   onTab: (tab: PanelTab) => void;
@@ -45,6 +77,12 @@ export type PanelProps = {
   onStopAgent: (id: string) => void;
   onToggleTurn: (index: number) => void;
   onToggleDiff: (path: string) => void;
+  onTreeToggle: (path: string) => void;
+  onInventoryFilter: (value: string) => void;
+  onSettings: () => void;
+  onBrlInput: (value: string) => void;
+  onSaveSettings: () => void;
+  onClearHistory: () => void;
 };
 
 const TABS: Array<{ id: PanelTab; label: string }> = [
@@ -52,6 +90,8 @@ const TABS: Array<{ id: PanelTab; label: string }> = [
   { id: 'agents', label: strings.tabs.agents },
   { id: 'turns', label: strings.tabs.turns },
   { id: 'diffs', label: strings.tabs.diffs },
+  { id: 'tree', label: strings.tabs.tree },
+  { id: 'inventory', label: strings.tabs.inventory },
 ];
 
 const svgIcon = (paths: string[], size = 12): SVGSVGElement => {
@@ -106,12 +146,17 @@ const header = (props: PanelProps): HTMLElement => {
     ? strings.status[session.status as keyof typeof strings.status] ?? strings.labels.unknown
     : '';
 
+  const settings = el('button', 'lens-settings-toggle', undefined, strings.labels.settings);
+  settings.type = 'button';
+  settings.addEventListener('click', () => props.onSettings());
+
   return el('div', 'lens-header', [
     el('div', 'lens-header-main', [
       el('div', 'lens-title', undefined, title),
       el('div', 'lens-sub', undefined, subtitle),
     ]),
     session ? statusPill(statusLabel, tone) : null,
+    settings,
   ]);
 };
 
@@ -226,8 +271,70 @@ const recentFiles = (
   return card;
 };
 
-const overview = (snapshot: LensSnapshot): HTMLElement => {
-  const model = overviewModel(snapshot);
+const sparkline = (values: number[], tone: Metric['tone']): SVGSVGElement => {
+  const width = 200;
+  const height = 32;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const step = values.length > 1 ? width / (values.length - 1) : width;
+  const points = values
+    .map((value, index) => `${index * step},${height - 3 - ((value - min) / span) * (height - 6)}`)
+    .join(' ');
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.setAttribute('width', '100%');
+  svg.setAttribute('height', String(height));
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.classList.add('sparkline', tone);
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  line.setAttribute('points', points);
+  line.setAttribute('fill', 'none');
+  line.setAttribute('stroke', 'currentColor');
+  line.setAttribute('stroke-width', '1.6');
+  line.setAttribute('stroke-linejoin', 'round');
+  line.setAttribute('stroke-linecap', 'round');
+  svg.append(line);
+  return svg;
+};
+
+const historySection = (points: LensHistoryPoint[], props: PanelProps): HTMLElement => {
+  if (points.length < 2) {
+    return section(3, strings.sections.history, empty(strings.empty.noHistory));
+  }
+
+  const costValues = points.map((point) => point.cost);
+  const contextValues = points.map((point) => point.contextPercent).filter((value): value is number => value !== null);
+  const last = points[points.length - 1]!;
+
+  const row = (label: string, value: string, chart: SVGSVGElement | null): HTMLElement =>
+    el('div', 'history-row', [
+      el('div', 'history-label', undefined, label),
+      chart ?? el('div', 'history-empty', undefined, '—'),
+      el('div', 'history-value', undefined, value),
+    ]);
+
+  const card = el('div', 'panel-card history-card', [
+    row(strings.labels.costHistory, formatUsd(last.cost), sparkline(costValues, 'normal')),
+    contextValues.length > 1
+      ? row(
+          strings.labels.contextHistory,
+          formatPercent(contextValues[contextValues.length - 1]),
+          sparkline(contextValues, 'muted'),
+        )
+      : null,
+  ]);
+
+  const clear = el('button', 'lens-small', undefined, props.confirmingClear ? strings.labels.confirmClear : strings.labels.clearHistory);
+  clear.type = 'button';
+  clear.addEventListener('click', () => props.onClearHistory());
+  card.append(clear);
+
+  return section(3, strings.sections.history, card, points.length);
+};
+
+const overview = (snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
+  const model = overviewModel(snapshot, props.brlRate);
   const context = model.metrics[0];
   const cards = model.metrics.slice(1).map(statCard);
   const grid = el('div', 'lens-grid');
@@ -243,6 +350,7 @@ const overview = (snapshot: LensSnapshot): HTMLElement => {
       model.lastTurn ? lastTurnCard(model.lastTurn) : empty(strings.empty.noTurns),
     ),
     section(2, strings.sections.recentFiles, recentFiles(model.recentFiles)),
+    historySection(props.history.points, props),
   ]);
 };
 
@@ -435,6 +543,159 @@ const diffCard = (row: DiffRow, props: PanelProps): HTMLElement => {
   return card;
 };
 
+const tree = (snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
+  const view = props.tree;
+  const touched = new Set(snapshot.recentFiles.map((file) => file.path));
+  const changed = new Map(snapshot.diff.map((file) => [file.path.replace(/^\.\//, ''), file.status]));
+  const rows: HTMLElement[] = [];
+
+  const walk = (key: string, depth: number): void => {
+    for (const entry of view.entries[key] ?? []) {
+      const isDirectory = entry.kind === 'directory';
+      const open = view.expanded.has(entry.relative);
+      const row = isDirectory
+        ? el('button', 'tree-row directory')
+        : el('div', 'tree-row');
+      if (isDirectory) {
+        (row as HTMLButtonElement).type = 'button';
+        row.addEventListener('click', () => props.onTreeToggle(entry.relative));
+      }
+      row.style.paddingLeft = `${6 + depth * 12}px`;
+      if (isDirectory) {
+        const marker = chevron(open);
+        marker.classList.add('tree-chevron');
+        row.append(marker);
+      } else {
+        const icon = svgIcon(['M4 2h5l3 3v9H4z', 'M9 2v3h3']);
+        icon.classList.add('tree-icon');
+        row.append(icon);
+      }
+      row.append(el('span', 'tree-name', undefined, entry.name));
+      if (touched.has(entry.path)) row.append(el('span', 'tree-touched'));
+      const gitStatus =
+        entry.gitStatus === 'A'
+          ? 'added'
+          : entry.gitStatus === 'D'
+            ? 'deleted'
+            : entry.gitStatus
+              ? 'modified'
+              : changed.get(entry.relative);
+      if (gitStatus) {
+        const letter = gitStatus === 'added' ? 'A' : gitStatus === 'deleted' ? 'D' : gitStatus === 'modified' ? 'M' : '';
+        if (letter) row.append(el('span', `tree-git ${gitStatus}`, undefined, letter));
+      }
+      rows.push(row);
+      if (isDirectory && open) walk(entry.relative, depth + 1);
+    }
+  };
+
+  if (view.entries['.']) walk('.', 0);
+
+  let content: HTMLElement;
+  if (view.error) {
+    content = el('div', 'banner error', [
+      el('div', 'banner-title', undefined, 'Falha ao ler a árvore'),
+      el('div', 'banner-body', undefined, view.error),
+    ]);
+  } else if (view.loading && rows.length === 0) {
+    content = empty('Lendo arquivos…');
+  } else if (rows.length === 0) {
+    content = empty(strings.empty.noTree);
+  } else {
+    content = el('div', 'panel-card', [
+      view.root ? el('div', 'tree-root', undefined, view.root) : null,
+      ...rows,
+    ]);
+  }
+
+  return section(1, strings.sections.tree, content, rows.length);
+};
+
+const inventory = (props: PanelProps): HTMLElement => {
+  const view = props.inventory;
+  const filter = view.filter.trim().toLowerCase();
+  const sections = (view.data?.sections ?? []).map((section) => ({
+    ...section,
+    items: section.items.filter((item) =>
+      filter === ''
+        ? true
+        : `${item.name} ${item.description} ${item.meta} ${item.status}`.toLowerCase().includes(filter),
+    ),
+  }));
+  const total = sections.reduce((sum, section) => sum + section.items.length, 0);
+
+  const input = el('input', 'inventory-filter');
+  input.type = 'search';
+  input.placeholder = strings.labels.filter;
+  input.value = view.filter;
+  input.addEventListener('input', () => props.onInventoryFilter(input.value));
+
+  let content: HTMLElement;
+  if (view.error) {
+    content = el('div', 'banner error', [
+      el('div', 'banner-title', undefined, 'Falha ao ler o inventário'),
+      el('div', 'banner-body', undefined, view.error),
+    ]);
+  } else if (view.loading && !view.data) {
+    content = empty('Lendo inventário…');
+  } else if (total === 0) {
+    content = empty(strings.empty.noInventory);
+  } else {
+    const list = el('div', undefined);
+    for (const section of sections) {
+      if (section.items.length === 0) continue;
+      const rows = el('div', 'panel-card');
+      for (const item of section.items) {
+        rows.append(
+          el('div', 'inventory-item', [
+            el('div', 'inventory-body', [
+              el('div', 'inventory-name', undefined, item.name),
+              item.description ? el('div', 'inventory-desc', undefined, item.description) : null,
+              item.meta ? el('div', 'inventory-meta', undefined, item.meta) : null,
+            ]),
+            el('span', `diff-badge ${item.tone}`, undefined, item.status),
+          ]),
+        );
+      }
+      list.append(
+        el('div', 'inventory-section', [
+          el('div', 'inventory-head', [
+            el('span', 'section-label', undefined, section.label),
+            el('span', 'inventory-count', undefined, String(section.items.length)),
+          ]),
+          rows,
+        ]),
+      );
+    }
+    content = list;
+  }
+
+  return el('div', undefined, [input, section(1, strings.sections.inventory, content, total)]);
+};
+
+const settingsCard = (props: PanelProps): HTMLElement => {
+  const input = el('input', 'settings-input');
+  input.type = 'number';
+  input.min = '0';
+  input.step = '0.01';
+  input.placeholder = '5,22';
+  input.value = props.brlInput;
+  input.addEventListener('input', () => props.onBrlInput(input.value));
+
+  const save = el('button', 'lens-small', undefined, strings.labels.save);
+  save.type = 'button';
+  save.addEventListener('click', () => props.onSaveSettings());
+
+  const close = el('button', 'lens-small', undefined, strings.labels.close);
+  close.type = 'button';
+  close.addEventListener('click', () => props.onSettings());
+
+  return el('div', 'settings-card', [
+    el('div', 'stat-label', undefined, strings.labels.rate),
+    el('div', 'settings-row', [input, save, close]),
+    el('div', 'settings-hint', undefined, 'Cotação manual; 0 desliga o valor em reais.'),
+  ]);
+};
 const diffs = (snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
   const view = props.diffView;
   const rows = view.rows ?? diffRows(snapshot);
@@ -501,6 +762,7 @@ const errorBanner = (props: PanelProps): HTMLElement | null => {
 export const renderPanel = (root: HTMLElement, props: PanelProps): void => {
   root.replaceChildren();
   root.append(header(props));
+  if (props.settingsOpen) root.append(settingsCard(props));
 
   if (!props.hasSession) {
     root.append(empty(strings.empty.noSession, strings.empty.noSessionHint));
@@ -516,8 +778,10 @@ export const renderPanel = (root: HTMLElement, props: PanelProps): void => {
     return;
   }
 
-  if (props.tab === 'overview') root.append(overview(props.snapshot));
+  if (props.tab === 'overview') root.append(overview(props.snapshot, props));
   else if (props.tab === 'agents') root.append(agents(props.snapshot, props));
   else if (props.tab === 'turns') root.append(turns(props.snapshot, props));
-  else root.append(diffs(props.snapshot, props));
+  else if (props.tab === 'diffs') root.append(diffs(props.snapshot, props));
+  else if (props.tab === 'tree') root.append(tree(props.snapshot, props));
+  else root.append(inventory(props));
 };

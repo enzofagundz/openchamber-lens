@@ -1,5 +1,6 @@
 import {
   formatAge,
+  formatBrl,
   formatDuration,
   formatPercent,
   formatTokens,
@@ -155,13 +156,14 @@ export const tabCounts = (snapshot: LensSnapshot): TabCounts => ({
   diffs: snapshot.diff.length,
 });
 
-export const overviewModel = (snapshot: LensSnapshot): OverviewModel => {
+export const overviewModel = (snapshot: LensSnapshot, brlRate = 0): OverviewModel => {
   const { session, counts, recentFiles } = snapshot;
   const now = snapshot.at;
   const contextHint =
     session.context.used === null
       ? 'sem leitura'
       : `${formatTokens(session.context.used)} de ${formatTokens(session.context.limit)}`;
+  const brl = brlRate > 0 ? ` · ${formatBrl(session.cost, brlRate)}` : '';
 
   return {
     title: session.title,
@@ -175,7 +177,7 @@ export const overviewModel = (snapshot: LensSnapshot): OverviewModel => {
         hint: contextHint,
         tone: contextTone(session.context.percent),
       },
-      { label: strings.labels.cost, value: formatUsd(session.cost), hint: `${counts.userTurns} turnos`, tone: 'normal' },
+      { label: strings.labels.cost, value: formatUsd(session.cost), hint: `${counts.userTurns} turnos${brl}`, tone: 'normal' },
       {
         label: strings.labels.tools,
         value: String(counts.toolCalls),

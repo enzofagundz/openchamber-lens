@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { buildSnapshot, buildStrip } from '../src/shared/derive.ts';
-import { formatAge, formatDuration, formatPercent, formatTokens, formatUsd } from '../src/shared/format.ts';
+import { formatAge, formatBrl, formatDuration, formatPercent, formatTokens, formatUsd } from '../src/shared/format.ts';
 import { agentRows, diffRows, diffRowsFromFiles, overviewModel, stripModel, tabCounts, turnRows } from '../src/shared/view.ts';
 import { errorText, strings } from '../src/shared/strings.ts';
 import { active, childMessages, childSession, diff, grandchildSession, models, rootMessages, rootSession } from './fixtures.ts';
@@ -27,6 +27,8 @@ describe('formatters', () => {
   test('formats money and percentage in pt-BR', () => {
     expect(formatUsd(0.1234)).toBe('US$ 0,1234');
     expect(formatUsd(2.5)).toBe('US$ 2,50');
+    expect(formatBrl(2.5, 5)).toBe('R$ 12,50');
+    expect(formatBrl(2.5, 0)).toBe('—');
     expect(formatPercent(53)).toBe('53%');
     expect(formatPercent(null)).toBe('—');
   });
@@ -52,6 +54,11 @@ describe('view models', () => {
     expect(model.tokens.find((token) => token.label === strings.labels.cacheRead)?.value).toBe('500');
     expect(model.lastTurn?.index).toBe(2);
     expect(model.recentFiles[0]?.action).toBe('editado');
+  });
+
+  test('overview adds BRL to the cost hint when a rate is set', () => {
+    const model = overviewModel(snapshot, 5);
+    expect(model.metrics.find((metric) => metric.label === strings.labels.cost)?.hint).toContain('R$ 2,50');
   });
 
   test('agent rows keep depth, parent and openability', () => {

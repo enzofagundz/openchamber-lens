@@ -1,6 +1,15 @@
 import { HostRequestError, type HostClient } from '@openchamber/sdk';
 
-import type { LensDiffFile, LensError, LensGitDiff, SnapshotResponse, StripResponse } from '../shared/types.ts';
+import type {
+  LensDiffFile,
+  LensError,
+  LensGitDiff,
+  LensHistoryPoint,
+  LensInventory,
+  LensTree,
+  SnapshotResponse,
+  StripResponse,
+} from '../shared/types.ts';
 
 export type Failure = LensError;
 
@@ -113,6 +122,71 @@ export const requestInterrupt = async (
       method: 'POST',
       path: '/interrupt',
       body: JSON.stringify({ sessionId, parentId }),
+    });
+    return parse(result.body);
+  } catch (error) {
+    return { data: null, error: failureOf(error) };
+  }
+};
+
+export const requestTree = async (
+  host: HostClient,
+  sessionId: string,
+  path?: string,
+): Promise<{ data: LensTree | null; error: Failure | null }> => {
+  try {
+    const result = await host.serviceRequest({
+      method: 'GET',
+      path: '/tree',
+      query: { sessionId, ...(path ? { path } : {}) },
+    });
+    return parse(result.body);
+  } catch (error) {
+    return { data: null, error: failureOf(error) };
+  }
+};
+
+export const requestInventory = async (
+  host: HostClient,
+  sessionId: string,
+): Promise<{ data: LensInventory | null; error: Failure | null }> => {
+  try {
+    const result = await host.serviceRequest({
+      method: 'GET',
+      path: '/inventory',
+      query: { sessionId },
+    });
+    return parse(result.body);
+  } catch (error) {
+    return { data: null, error: failureOf(error) };
+  }
+};
+
+export const requestHistory = async (
+  host: HostClient,
+  sessionId: string,
+): Promise<{ data: LensHistoryPoint[] | null; error: Failure | null }> => {
+  try {
+    const result = await host.serviceRequest({
+      method: 'GET',
+      path: '/history',
+      query: { sessionId, limit: '500' },
+    });
+    return parse(result.body);
+  } catch (error) {
+    return { data: null, error: failureOf(error) };
+  }
+};
+
+export const clearHistory = async (
+  host: HostClient,
+  sessionId: string,
+): Promise<{ data: { cleared: boolean } | null; error: Failure | null }> => {
+  try {
+    const result = await host.serviceRequest({
+      method: 'DELETE',
+      path: '/history',
+      query: { sessionId },
     });
     return parse(result.body);
   } catch (error) {

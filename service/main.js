@@ -1,5 +1,6 @@
 // src/service/app.ts
 import http from "node:http";
+import path3 from "node:path";
 
 // src/shared/derive.ts
 var PATCH_FILE_LIMIT = 20000;
@@ -500,14 +501,19 @@ var loopbackUrl = (value) => {
     return null;
   }
 };
-var discoverBaseUrl = async ({ dataDir, explicit }) => {
+var discoverServer = async ({ dataDir, explicit }) => {
   const override = loopbackUrl(explicit ?? process.env.LENS_BASE_URL ?? null);
   if (override)
-    return override;
+    return { baseUrl: override, auth: null };
   const settings = await readJson(path.join(dataDir, "settings.json"));
   const desktopPort = portOf(settings?.desktopLocalPort);
-  if (desktopPort)
-    return `http://127.0.0.1:${desktopPort}`;
+  if (desktopPort) {
+    const token = typeof settings?.desktopLocalClientToken === "string" ? settings.desktopLocalClientToken.trim() : "";
+    return {
+      baseUrl: `http://127.0.0.1:${desktopPort}`,
+      auth: token ? { kind: "bearer", token } : null
+    };
+  }
   const runDir = path.join(dataDir, "run");
   let files = [];
   try {
@@ -522,11 +528,18 @@ var discoverBaseUrl = async ({ dataDir, explicit }) => {
     const port = portOf(parsed?.port);
     if (!port)
       continue;
+    const password = typeof parsed?.uiPassword === "string" ? parsed.uiPassword : "";
     const info = await stat(full).catch(() => null);
-    candidates.push({ url: `http://127.0.0.1:${port}`, mtime: info?.mtimeMs ?? 0 });
+    candidates.push({
+      server: {
+        baseUrl: `http://127.0.0.1:${port}`,
+        auth: password ? { kind: "password", password } : null
+      },
+      mtime: info?.mtimeMs ?? 0
+    });
   }
   candidates.sort((a, b) => b.mtime - a.mtime);
-  return candidates[0]?.url ?? null;
+  return candidates[0]?.server ?? null;
 };
 
 // src/service/events.ts
@@ -534,14 +547,16 @@ class EventStream {
   baseUrl;
   onEvent;
   fetchImpl;
+  authHeaders;
   controller = null;
   stopped = false;
   retry = 0;
   timer = null;
-  constructor(baseUrl, onEvent, fetchImpl = fetch) {
+  constructor(baseUrl, onEvent, fetchImpl = fetch, authHeaders = async () => ({})) {
     this.baseUrl = baseUrl;
     this.onEvent = onEvent;
     this.fetchImpl = fetchImpl;
+    this.authHeaders = authHeaders;
   }
   start() {
     if (this.controller || this.timer)
@@ -575,7 +590,7 @@ class EventStream {
     try {
       const response = await this.fetchImpl(new URL("/api/event", this.baseUrl), {
         method: "GET",
-        headers: { accept: "text/event-stream" },
+        headers: { accept: "text/event-stream", ...await this.authHeaders() },
         signal: controller.signal
       });
       if (!response.ok || !response.body)
@@ -613,6 +628,96 @@ class EventStream {
   }
 }
 
+// src/service/history.ts
+import { appendFile, mkdir, readFile as readFile2, rm, stat as stat2, writeFile } from "node:fs/promises";
+import path2 from "node:path";
+var MAX_POINTS = 2000;
+var MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+var MIN_INTERVAL_MS = 1e4;
+
+class HistoryStore {
+  dir;
+  now;
+  lastWrite = new Map;
+  constructor(dir, now = Date.now) {
+    this.dir = dir;
+    this.now = now;
+  }
+  file(sessionId) {
+    return path2.join(this.dir, `${sessionId}.jsonl`);
+  }
+  async record(snapshot) {
+    const id = snapshot.session.id;
+    const current = this.now();
+    const previous = this.lastWrite.get(id) ?? 0;
+    if (current - previous < MIN_INTERVAL_MS)
+      return;
+    this.lastWrite.set(id, current);
+    const point = {
+      at: current,
+      cost: snapshot.session.cost,
+      contextPercent: snapshot.session.context.percent,
+      contextUsed: snapshot.session.context.used,
+      toolCalls: snapshot.counts.toolCalls,
+      failures: snapshot.counts.toolFailures,
+      turns: snapshot.counts.userTurns,
+      filesChanged: snapshot.counts.filesChanged,
+      runningAgents: snapshot.agents.filter((agent) => !agent.isMain && agent.status === "running").length
+    };
+    await mkdir(this.dir, { recursive: true });
+    await appendFile(this.file(id), `${JSON.stringify(point)}
+`, "utf8");
+    await this.prune(id);
+  }
+  async read(sessionId, limit = 500) {
+    try {
+      const raw = await readFile2(this.file(sessionId), "utf8");
+      const points = [];
+      for (const line of raw.split(`
+`)) {
+        if (!line.trim())
+          continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (typeof parsed.at !== "number" || typeof parsed.cost !== "number")
+            continue;
+          points.push({
+            at: parsed.at,
+            cost: parsed.cost,
+            contextPercent: typeof parsed.contextPercent === "number" ? parsed.contextPercent : null,
+            contextUsed: typeof parsed.contextUsed === "number" ? parsed.contextUsed : null,
+            toolCalls: typeof parsed.toolCalls === "number" ? parsed.toolCalls : 0,
+            failures: typeof parsed.failures === "number" ? parsed.failures : 0,
+            turns: typeof parsed.turns === "number" ? parsed.turns : 0,
+            filesChanged: typeof parsed.filesChanged === "number" ? parsed.filesChanged : 0,
+            runningAgents: typeof parsed.runningAgents === "number" ? parsed.runningAgents : 0
+          });
+        } catch {}
+      }
+      return points.slice(-Math.max(1, Math.min(limit, MAX_POINTS)));
+    } catch {
+      return [];
+    }
+  }
+  async clear(sessionId) {
+    await rm(this.file(sessionId), { force: true });
+    this.lastWrite.delete(sessionId);
+  }
+  async prune(sessionId) {
+    try {
+      const info = await stat2(this.file(sessionId));
+      if (info.size < 256000)
+        return;
+      const points = await this.read(sessionId, MAX_POINTS);
+      const cutoff = this.now() - MAX_AGE_MS;
+      const kept = points.filter((point) => point.at >= cutoff).slice(-MAX_POINTS);
+      await writeFile(this.file(sessionId), kept.map((point) => JSON.stringify(point)).join(`
+`) + (kept.length > 0 ? `
+` : ""), "utf8");
+    } catch {}
+  }
+}
+
 // src/service/upstream.ts
 class UpstreamError extends Error {
   code;
@@ -634,16 +739,51 @@ class UpstreamClient {
   baseUrl;
   fetchImpl;
   now;
+  auth;
   sessionsCache = null;
   activeCache = null;
   modelCache = null;
   messageCache = new Map;
   conversationCache = new Map;
   diffCache = new Map;
-  constructor(baseUrl, fetchImpl = fetch, now = Date.now) {
+  constructor(baseUrl, fetchImpl = fetch, now = Date.now, auth = null) {
     this.baseUrl = baseUrl;
     this.fetchImpl = fetchImpl;
     this.now = now;
+    this.auth = auth;
+  }
+  cookie = null;
+  authPromise = null;
+  async authHeaders() {
+    if (!this.auth)
+      return {};
+    if (this.auth.kind === "bearer")
+      return { authorization: `Bearer ${this.auth.token}` };
+    if (this.cookie)
+      return { cookie: this.cookie };
+    if (this.authPromise)
+      return this.authPromise;
+    this.authPromise = (async () => {
+      const response = await this.fetchImpl(new URL("/auth/session", this.baseUrl), {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ password: this.auth && this.auth.kind === "password" ? this.auth.password : "" }),
+        signal: AbortSignal.timeout(5000)
+      }).catch(() => null);
+      if (!response || !response.ok) {
+        throw new UpstreamError("auth-required", "O servidor local recusou a senha de acesso.");
+      }
+      const cookies = response.headers.getSetCookie?.() ?? [];
+      const raw = response.headers.get("set-cookie") ?? "";
+      const match = [...cookies, raw].join(";").match(/oc_ui_session(?:_\d+)?=[^;]+/);
+      if (!match)
+        throw new UpstreamError("auth-required", "O servidor local não devolveu uma sessão.");
+      this.cookie = match[0];
+      return { cookie: this.cookie };
+    })().finally(() => {
+      this.authPromise = null;
+    });
+    return this.authPromise;
   }
   async raw(requestPath, query, options) {
     const url = new URL(requestPath, this.baseUrl);
@@ -652,16 +792,20 @@ class UpstreamClient {
     let response;
     try {
       const method = options?.method ?? "GET";
+      const auth = await this.authHeaders();
       response = await this.fetchImpl(url, {
         method,
         headers: {
           accept: "application/json",
-          ...method === "POST" ? { "content-type": "application/json" } : {}
+          ...method === "POST" ? { "content-type": "application/json" } : {},
+          ...auth
         },
         ...options?.body !== undefined ? { body: options.body } : {},
         signal: AbortSignal.timeout(5000)
       });
     } catch (error) {
+      if (error instanceof UpstreamError)
+        throw error;
       throw new UpstreamError("upstream-failed", error instanceof Error ? error.message : "Falha ao falar com o servidor local.");
     }
     if (response.status === 401 || response.status === 403) {
@@ -797,12 +941,18 @@ class UpstreamClient {
   async getGitStatus(directory) {
     return this.raw("/api/git/status", { directory });
   }
-  async getGitDiff(directory, path2, staged = false) {
+  async getGitDiff(directory, path3, staged = false) {
     return this.raw("/api/git/diff", {
       directory,
-      path: path2,
+      path: path3,
       ...staged ? { staged: "true" } : {}
     });
+  }
+  async getFsList(path3) {
+    return this.raw("/api/fs/list", { path: path3 });
+  }
+  async getData(path3, query) {
+    return this.data(path3, query);
   }
   invalidate(sessionId) {
     this.sessionsCache = null;
@@ -826,7 +976,25 @@ class UpstreamClient {
 var MAX_CHILD_MESSAGES = 12;
 var MESSAGES_FOR_STRIP = 20;
 var GIT_FILE_LIMIT = 100;
+var TREE_ENTRY_LIMIT = 500;
+var INVENTORY_TTL = 30000;
 var BODY_LIMIT = 16384;
+var TREE_IGNORED = new Set([
+  ".git",
+  ".openchamber",
+  ".opencode",
+  ".scratch",
+  "node_modules",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+  ".venv",
+  "venv",
+  "__pycache__",
+  "target",
+  "coverage",
+  ".cache"
+]);
 var errorOf = (code, message) => ({ code, message });
 var isAuth = (error) => error instanceof UpstreamError && error.code === "auth-required";
 var soft = async (work, fallback) => {
@@ -864,6 +1032,8 @@ var createLensService = (config) => {
   const now = config.now ?? Date.now;
   const host = config.host ?? "127.0.0.1";
   const dataDir = config.dataDir ?? defaultDataDir();
+  const history = new HistoryStore(config.historyDir ?? path3.join(dataDir, "lens-history"), now);
+  let inventoryCache = null;
   let upstream = null;
   let events = null;
   let baseUrl = null;
@@ -894,28 +1064,29 @@ var createLensService = (config) => {
   const resolveUpstream = async () => {
     if (upstream && now() - baseAt < 5000)
       return upstream;
-    const discovered = await discoverBaseUrl({
+    const discovered = await discoverServer({
       dataDir,
       explicit: config.baseUrl ?? null
     });
     if (!discovered)
       throw new UpstreamError("no-server", "Servidor local do OpenChamber não encontrado.");
-    if (upstream && baseUrl === discovered) {
+    if (upstream && baseUrl === discovered.baseUrl) {
       baseAt = now();
       return upstream;
     }
     events?.stop();
-    baseUrl = discovered;
+    baseUrl = discovered.baseUrl;
     baseAt = now();
-    upstream = new UpstreamClient(discovered, config.fetchImpl, now);
+    const client = new UpstreamClient(discovered.baseUrl, config.fetchImpl, now, discovered.auth);
+    upstream = client;
     if (config.sse !== false) {
-      events = new EventStream(discovered, (event) => {
+      events = new EventStream(discovered.baseUrl, (event) => {
         const sessionId = typeof event.data?.sessionID === "string" ? event.data.sessionID : undefined;
-        upstream?.invalidate(sessionId);
-      }, config.fetchImpl);
+        client.invalidate(sessionId);
+      }, config.fetchImpl, () => client.authHeaders());
       events.start();
     }
-    return upstream;
+    return client;
   };
   const loadMessages = async (client, session, sessions, limit) => {
     const messages = limit < 200 ? await soft(client.getMessages(session.id, limit), []) : await soft(client.getConversation(session.id), []);
@@ -952,6 +1123,9 @@ var createLensService = (config) => {
     });
     if (strip)
       return { data: buildStrip(snapshot), error: null };
+    await history.record(snapshot).catch(() => {
+      return;
+    });
     return { data: snapshot, error: null };
   };
   const gitDiff = async (sessionId) => {
@@ -972,13 +1146,13 @@ var createLensService = (config) => {
     const files = (status.files ?? []).filter((file) => typeof file.path === "string" && file.path.length > 0).slice(0, GIT_FILE_LIMIT);
     const raw = [];
     for (const file of files) {
-      const path2 = file.path;
+      const path4 = file.path;
       const staged = typeof file.index === "string" && ![" ", "?"].includes(file.index);
       const working = typeof file.working_dir === "string" && ![" ", "?"].includes(file.working_dir);
       const untracked = file.index === "?" || file.working_dir === "?";
       const patches = [];
       if (staged) {
-        const diff = await client.getGitDiff(directory, path2, true).catch((error) => {
+        const diff = await client.getGitDiff(directory, path4, true).catch((error) => {
           if (isAuth(error))
             throw error;
           return null;
@@ -987,7 +1161,7 @@ var createLensService = (config) => {
           patches.push(diff.diff);
       }
       if (working || untracked || !staged) {
-        const diff = await client.getGitDiff(directory, path2).catch((error) => {
+        const diff = await client.getGitDiff(directory, path4).catch((error) => {
           if (isAuth(error))
             throw error;
           return null;
@@ -995,7 +1169,7 @@ var createLensService = (config) => {
         if (diff?.diff)
           patches.push(diff.diff);
       }
-      raw.push({ file: path2, patch: patches.join(`
+      raw.push({ file: path4, patch: patches.join(`
 `) });
     }
     return {
@@ -1015,6 +1189,103 @@ var createLensService = (config) => {
     const messages = await client.getConversation(sessionId);
     return { data: deriveTurnDiff(messages, turn), error: null };
   };
+  const tree = async (sessionId, requested) => {
+    const client = await resolveUpstream();
+    const session = await client.getSession(sessionId);
+    const directory = session.location?.directory;
+    if (!directory)
+      throw new UpstreamError("bad-answer", "Sessão sem diretório de projeto.");
+    const root = path3.resolve(directory);
+    const target = requested ? path3.resolve(root, requested) : root;
+    if (target !== root && !target.startsWith(`${root}${path3.sep}`)) {
+      throw new UpstreamError("bad-answer", "Caminho fora do projeto.");
+    }
+    const listing = await client.getFsList(target);
+    const gitFiles = new Map;
+    try {
+      const status = await client.getGitStatus(directory);
+      for (const file of status.files ?? []) {
+        if (!file.path)
+          continue;
+        const mark = file.working_dir && file.working_dir !== " " && file.working_dir !== "?" ? file.working_dir : file.index;
+        if (mark && mark !== " " && mark !== "?")
+          gitFiles.set(file.path, mark);
+      }
+    } catch {}
+    const entries = (listing.entries ?? []).filter((entry) => typeof entry.name === "string" && typeof entry.path === "string").filter((entry) => !TREE_IGNORED.has(entry.name)).slice(0, TREE_ENTRY_LIMIT).map((entry) => {
+      const absolute = entry.path;
+      const relative = path3.relative(root, absolute) || ".";
+      const kind = entry.isDirectory ? "directory" : entry.isSymbolicLink ? "symlink" : "file";
+      return {
+        name: entry.name,
+        path: absolute,
+        relative,
+        kind,
+        touched: false,
+        ...gitFiles.has(relative) ? { gitStatus: gitFiles.get(relative) } : {}
+      };
+    }).sort((a, b) => {
+      if (a.kind === "directory" !== (b.kind === "directory"))
+        return a.kind === "directory" ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    return {
+      data: {
+        path: path3.relative(root, target) || ".",
+        root,
+        entries
+      },
+      error: null
+    };
+  };
+  const inventory = async (sessionId) => {
+    const client = await resolveUpstream();
+    const session = await client.getSession(sessionId);
+    const directory = session.location?.directory ?? undefined;
+    const query = directory ? { directory } : undefined;
+    if (inventoryCache && now() - inventoryCache.at < INVENTORY_TTL) {
+      return { data: inventoryCache.data, error: null };
+    }
+    const [agents, commands, skills, plugins, mcp] = await Promise.all([
+      soft(client.getData("/api/agent", query), []),
+      soft(client.getData("/api/command", query), []),
+      soft(client.getData("/api/skill", query), []),
+      soft(client.getData("/api/plugin", query), []),
+      soft(client.getData("/api/mcp", query), [])
+    ]);
+    const rows = (value) => value.filter((entry) => recordOf(entry) !== null);
+    const item = (name, description, meta, status, tone = "muted") => ({ name, description, meta, status, tone });
+    const agentItems = rows(agents).filter((entry) => entry.hidden !== true).slice(0, 200).map((entry) => {
+      const model = recordOf(entry.model);
+      const modelName = model ? `${text2(model.providerID)}/${text2(model.id)}` : "";
+      return item(text2(entry.name) || text2(entry.id) || "—", text2(entry.description), `${text2(entry.mode)}${modelName ? ` · ${modelName}` : ""}`, "disponível", "normal");
+    });
+    const commandItems = rows(commands).slice(0, 200).map((entry) => item(text2(entry.name) || "—", text2(entry.description), "comando", "disponível", "normal"));
+    const skillItems = rows(skills).slice(0, 200).map((entry) => item(text2(entry.name) || text2(entry.id) || "—", text2(entry.description), text2(entry.path), "disponível", "muted"));
+    const pluginItems = rows(plugins).slice(0, 200).map((entry) => {
+      const source = recordOf(entry.source);
+      const state = recordOf(entry.state);
+      const status = text2(state?.status) || "—";
+      return item(text2(entry.id) || "—", "", text2(source?.type), status, status === "active" || status === "enabled" ? "normal" : "muted");
+    });
+    const mcpItems = rows(mcp).slice(0, 200).map((entry) => {
+      const status = recordOf(entry.status);
+      const state = text2(status?.status) || "—";
+      const error = text2(status?.error);
+      return item(text2(entry.name) || "—", error, "MCP", state, state === "failed" ? "danger" : state === "connected" ? "normal" : "muted");
+    });
+    const sections = [
+      { id: "agents", label: "Agentes", count: agentItems.length, items: agentItems },
+      { id: "commands", label: "Comandos", count: commandItems.length, items: commandItems },
+      { id: "skills", label: "Skills", count: skillItems.length, items: skillItems },
+      { id: "mcp", label: "MCP", count: mcpItems.length, items: mcpItems },
+      { id: "plugins", label: "Plugins", count: pluginItems.length, items: pluginItems }
+    ];
+    const data = { sections };
+    inventoryCache = { at: now(), data };
+    return { data, error: null };
+  };
+  const text2 = (value) => typeof value === "string" ? value : "";
   const interrupt = async (req, res) => {
     const body = recordOf(await readBody(req));
     const sessionId = typeof body?.sessionId === "string" ? body.sessionId.trim() : "";
@@ -1054,6 +1325,16 @@ var createLensService = (config) => {
       }
       return;
     }
+    if (req.method === "DELETE" && url.pathname === "/history") {
+      const sessionId2 = url.searchParams.get("sessionId")?.trim();
+      if (!sessionId2) {
+        send(res, 400, { data: null, error: errorOf("bad-answer", "sessionId é obrigatório.") });
+        return;
+      }
+      await history.clear(sessionId2);
+      send(res, 200, { data: { cleared: true }, error: null });
+      return;
+    }
     if (req.method !== "GET") {
       send(res, 405, { data: null, error: errorOf("bad-answer", "Método não permitido.") });
       return;
@@ -1062,7 +1343,7 @@ var createLensService = (config) => {
       send(res, 200, { ok: true });
       return;
     }
-    const supported = new Set(["/snapshot", "/strip", "/git-diff", "/turn-diff"]);
+    const supported = new Set(["/snapshot", "/strip", "/git-diff", "/turn-diff", "/history", "/tree", "/inventory"]);
     if (!supported.has(url.pathname)) {
       send(res, 404, { data: null, error: errorOf("bad-answer", "Rota desconhecida.") });
       return;
@@ -1084,6 +1365,22 @@ var createLensService = (config) => {
           return;
         }
         send(res, 200, await turnDiff(sessionId, turn));
+        return;
+      }
+      if (url.pathname === "/history") {
+        const limit = Number(url.searchParams.get("limit") ?? "500");
+        send(res, 200, {
+          data: await history.read(sessionId, Number.isFinite(limit) ? limit : 500),
+          error: null
+        });
+        return;
+      }
+      if (url.pathname === "/tree") {
+        send(res, 200, await tree(sessionId, url.searchParams.get("path")));
+        return;
+      }
+      if (url.pathname === "/inventory") {
+        send(res, 200, await inventory(sessionId));
         return;
       }
       const result = await build(sessionId, url.pathname === "/strip");

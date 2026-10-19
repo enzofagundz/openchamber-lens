@@ -1739,6 +1739,12 @@ ${GUEST_UI_LOOK_CSS}`;
     const digits = value > 0 && value < 0.01 ? 5 : value < 1 ? 4 : 2;
     return `US$ ${value.toFixed(digits).replace(".", ",")}`;
   };
+  var formatBrl = (usd, rate) => {
+    if (usd === null || usd === undefined || !Number.isFinite(usd) || !Number.isFinite(rate) || rate <= 0) {
+      return "—";
+    }
+    return `R$ ${(usd * rate).toFixed(2).replace(".", ",")}`;
+  };
   var formatPercent = (value) => {
     if (value === null || value === undefined || !Number.isFinite(value))
       return "—";
@@ -1796,7 +1802,9 @@ ${GUEST_UI_LOOK_CSS}`;
       overview: "Visão geral",
       agents: "Agentes",
       turns: "Turnos",
-      diffs: "Diffs"
+      diffs: "Diffs",
+      tree: "Árvore",
+      inventory: "Inventário"
     },
     empty: {
       noSession: "Nenhuma sessão aberta.",
@@ -1804,7 +1812,10 @@ ${GUEST_UI_LOOK_CSS}`;
       noTurns: "Nenhum turno nesta sessão.",
       noAgents: "Nenhum subagente nesta sessão.",
       noDiff: "Nenhum arquivo alterado nesta sessão.",
-      noRecent: "Nenhum arquivo tocado ainda."
+      noRecent: "Nenhum arquivo tocado ainda.",
+      noTree: "Nenhum arquivo neste diretório.",
+      noInventory: "Nenhum item encontrado.",
+      noHistory: "Coletando histórico…"
     },
     labels: {
       context: "Contexto",
@@ -1835,6 +1846,16 @@ ${GUEST_UI_LOOK_CSS}`;
       stop: "Parar",
       stopConfirm: "Confirmar?",
       stopping: "Parando…",
+      settings: "Ajustes",
+      rate: "Cotação do dólar (R$)",
+      save: "Salvar",
+      close: "Fechar",
+      filter: "Filtrar",
+      clearHistory: "Limpar histórico",
+      confirmClear: "Confirmar limpeza?",
+      history: "Histórico",
+      costHistory: "Custo",
+      contextHistory: "Contexto",
       parent: "pai",
       start: "Início",
       patchTruncated: "Patch truncado para manter o painel rápido.",
@@ -1846,7 +1867,10 @@ ${GUEST_UI_LOOK_CSS}`;
       agents: "Subagentes",
       turns: "Turnos",
       diffs: "Arquivos alterados",
-      tokens: "Tokens"
+      tokens: "Tokens",
+      tree: "Projeto",
+      inventory: "Instalado",
+      history: "Histórico"
     },
     status: {
       running: "rodando",
@@ -1966,10 +1990,11 @@ ${GUEST_UI_LOOK_CSS}`;
     turns: snapshot.turns.length,
     diffs: snapshot.diff.length
   });
-  var overviewModel = (snapshot) => {
+  var overviewModel = (snapshot, brlRate = 0) => {
     const { session, counts, recentFiles } = snapshot;
     const now = snapshot.at;
     const contextHint = session.context.used === null ? "sem leitura" : `${formatTokens(session.context.used)} de ${formatTokens(session.context.limit)}`;
+    const brl = brlRate > 0 ? ` · ${formatBrl(session.cost, brlRate)}` : "";
     return {
       title: session.title,
       subtitle: `${session.agent} · ${session.model.name}${session.model.variant ? ` · ${session.model.variant}` : ""}`,
@@ -1982,7 +2007,7 @@ ${GUEST_UI_LOOK_CSS}`;
           hint: contextHint,
           tone: contextTone(session.context.percent)
         },
-        { label: strings.labels.cost, value: formatUsd(session.cost), hint: `${counts.userTurns} turnos`, tone: "normal" },
+        { label: strings.labels.cost, value: formatUsd(session.cost), hint: `${counts.userTurns} turnos${brl}`, tone: "normal" },
         {
           label: strings.labels.tools,
           value: String(counts.toolCalls),
@@ -2137,6 +2162,54 @@ ${GUEST_UI_LOOK_CSS}`;
       return { data: null, error: failureOf(error) };
     }
   };
+  var requestTree = async (host, sessionId, path) => {
+    try {
+      const result = await host.serviceRequest({
+        method: "GET",
+        path: "/tree",
+        query: { sessionId, ...path ? { path } : {} }
+      });
+      return parse(result.body);
+    } catch (error) {
+      return { data: null, error: failureOf(error) };
+    }
+  };
+  var requestInventory = async (host, sessionId) => {
+    try {
+      const result = await host.serviceRequest({
+        method: "GET",
+        path: "/inventory",
+        query: { sessionId }
+      });
+      return parse(result.body);
+    } catch (error) {
+      return { data: null, error: failureOf(error) };
+    }
+  };
+  var requestHistory = async (host, sessionId) => {
+    try {
+      const result = await host.serviceRequest({
+        method: "GET",
+        path: "/history",
+        query: { sessionId, limit: "500" }
+      });
+      return parse(result.body);
+    } catch (error) {
+      return { data: null, error: failureOf(error) };
+    }
+  };
+  var clearHistory = async (host, sessionId) => {
+    try {
+      const result = await host.serviceRequest({
+        method: "DELETE",
+        path: "/history",
+        query: { sessionId }
+      });
+      return parse(result.body);
+    } catch (error) {
+      return { data: null, error: failureOf(error) };
+    }
+  };
 
   // src/panel/dom.ts
   var el2 = (tag, className, children, text) => {
@@ -2159,7 +2232,9 @@ ${GUEST_UI_LOOK_CSS}`;
     { id: "overview", label: strings.tabs.overview },
     { id: "agents", label: strings.tabs.agents },
     { id: "turns", label: strings.tabs.turns },
-    { id: "diffs", label: strings.tabs.diffs }
+    { id: "diffs", label: strings.tabs.diffs },
+    { id: "tree", label: strings.tabs.tree },
+    { id: "inventory", label: strings.tabs.inventory }
   ];
   var svgIcon = (paths, size = 12) => {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -2201,12 +2276,16 @@ ${GUEST_UI_LOOK_CSS}`;
     const subtitle = session ? `${session.agent} · ${session.model.name}${session.model.variant ? ` · ${session.model.variant}` : ""}` : props.hasSession ? "Lendo sessão…" : strings.empty.noSessionHint;
     const tone2 = session?.status === "running" ? "normal" : session?.status === "failed" ? "danger" : "muted";
     const statusLabel = session ? strings.status[session.status] ?? strings.labels.unknown : "";
+    const settings = el2("button", "lens-settings-toggle", undefined, strings.labels.settings);
+    settings.type = "button";
+    settings.addEventListener("click", () => props.onSettings());
     return el2("div", "lens-header", [
       el2("div", "lens-header-main", [
         el2("div", "lens-title", undefined, title),
         el2("div", "lens-sub", undefined, subtitle)
       ]),
-      session ? statusPill(statusLabel, tone2) : null
+      session ? statusPill(statusLabel, tone2) : null,
+      settings
     ]);
   };
   var tabCount = (snapshot, id) => {
@@ -2308,8 +2387,54 @@ ${GUEST_UI_LOOK_CSS}`;
     }
     return card;
   };
-  var overview = (snapshot) => {
-    const model = overviewModel(snapshot);
+  var sparkline = (values, tone2) => {
+    const width = 200;
+    const height = 32;
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = max - min || 1;
+    const step = values.length > 1 ? width / (values.length - 1) : width;
+    const points = values.map((value, index) => `${index * step},${height - 3 - (value - min) / span * (height - 6)}`).join(" ");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", String(height));
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.classList.add("sparkline", tone2);
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    line.setAttribute("points", points);
+    line.setAttribute("fill", "none");
+    line.setAttribute("stroke", "currentColor");
+    line.setAttribute("stroke-width", "1.6");
+    line.setAttribute("stroke-linejoin", "round");
+    line.setAttribute("stroke-linecap", "round");
+    svg.append(line);
+    return svg;
+  };
+  var historySection = (points, props) => {
+    if (points.length < 2) {
+      return section(3, strings.sections.history, empty(strings.empty.noHistory));
+    }
+    const costValues = points.map((point) => point.cost);
+    const contextValues = points.map((point) => point.contextPercent).filter((value) => value !== null);
+    const last = points[points.length - 1];
+    const row = (label, value, chart) => el2("div", "history-row", [
+      el2("div", "history-label", undefined, label),
+      chart ?? el2("div", "history-empty", undefined, "—"),
+      el2("div", "history-value", undefined, value)
+    ]);
+    const card = el2("div", "panel-card history-card", [
+      row(strings.labels.costHistory, formatUsd(last.cost), sparkline(costValues, "normal")),
+      contextValues.length > 1 ? row(strings.labels.contextHistory, formatPercent(contextValues[contextValues.length - 1]), sparkline(contextValues, "muted")) : null
+    ]);
+    const clear = el2("button", "lens-small", undefined, props.confirmingClear ? strings.labels.confirmClear : strings.labels.clearHistory);
+    clear.type = "button";
+    clear.addEventListener("click", () => props.onClearHistory());
+    card.append(clear);
+    return section(3, strings.sections.history, card, points.length);
+  };
+  var overview = (snapshot, props) => {
+    const model = overviewModel(snapshot, props.brlRate);
     const context = model.metrics[0];
     const cards = model.metrics.slice(1).map(statCard);
     const grid = el2("div", "lens-grid");
@@ -2320,7 +2445,8 @@ ${GUEST_UI_LOOK_CSS}`;
       grid,
       tokenCard(model.tokens),
       section(1, strings.sections.lastTurn, model.lastTurn ? lastTurnCard(model.lastTurn) : empty(strings.empty.noTurns)),
-      section(2, strings.sections.recentFiles, recentFiles(model.recentFiles))
+      section(2, strings.sections.recentFiles, recentFiles(model.recentFiles)),
+      historySection(props.history.points, props)
     ]);
   };
   var agentIcon = (main) => main ? svgIcon(["M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z", "M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"]) : svgIcon(["M8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3Z", "M5.5 8h5"]);
@@ -2460,6 +2586,135 @@ ${GUEST_UI_LOOK_CSS}`;
     }
     return card;
   };
+  var tree = (snapshot, props) => {
+    const view = props.tree;
+    const touched = new Set(snapshot.recentFiles.map((file) => file.path));
+    const changed = new Map(snapshot.diff.map((file) => [file.path.replace(/^\.\//, ""), file.status]));
+    const rows = [];
+    const walk = (key, depth) => {
+      for (const entry of view.entries[key] ?? []) {
+        const isDirectory = entry.kind === "directory";
+        const open = view.expanded.has(entry.relative);
+        const row = isDirectory ? el2("button", "tree-row directory") : el2("div", "tree-row");
+        if (isDirectory) {
+          row.type = "button";
+          row.addEventListener("click", () => props.onTreeToggle(entry.relative));
+        }
+        row.style.paddingLeft = `${6 + depth * 12}px`;
+        if (isDirectory) {
+          const marker = chevron(open);
+          marker.classList.add("tree-chevron");
+          row.append(marker);
+        } else {
+          const icon2 = svgIcon(["M4 2h5l3 3v9H4z", "M9 2v3h3"]);
+          icon2.classList.add("tree-icon");
+          row.append(icon2);
+        }
+        row.append(el2("span", "tree-name", undefined, entry.name));
+        if (touched.has(entry.path))
+          row.append(el2("span", "tree-touched"));
+        const gitStatus = entry.gitStatus === "A" ? "added" : entry.gitStatus === "D" ? "deleted" : entry.gitStatus ? "modified" : changed.get(entry.relative);
+        if (gitStatus) {
+          const letter = gitStatus === "added" ? "A" : gitStatus === "deleted" ? "D" : gitStatus === "modified" ? "M" : "";
+          if (letter)
+            row.append(el2("span", `tree-git ${gitStatus}`, undefined, letter));
+        }
+        rows.push(row);
+        if (isDirectory && open)
+          walk(entry.relative, depth + 1);
+      }
+    };
+    if (view.entries["."])
+      walk(".", 0);
+    let content;
+    if (view.error) {
+      content = el2("div", "banner error", [
+        el2("div", "banner-title", undefined, "Falha ao ler a árvore"),
+        el2("div", "banner-body", undefined, view.error)
+      ]);
+    } else if (view.loading && rows.length === 0) {
+      content = empty("Lendo arquivos…");
+    } else if (rows.length === 0) {
+      content = empty(strings.empty.noTree);
+    } else {
+      content = el2("div", "panel-card", [
+        view.root ? el2("div", "tree-root", undefined, view.root) : null,
+        ...rows
+      ]);
+    }
+    return section(1, strings.sections.tree, content, rows.length);
+  };
+  var inventory = (props) => {
+    const view = props.inventory;
+    const filter = view.filter.trim().toLowerCase();
+    const sections = (view.data?.sections ?? []).map((section2) => ({
+      ...section2,
+      items: section2.items.filter((item) => filter === "" ? true : `${item.name} ${item.description} ${item.meta} ${item.status}`.toLowerCase().includes(filter))
+    }));
+    const total = sections.reduce((sum, section2) => sum + section2.items.length, 0);
+    const input = el2("input", "inventory-filter");
+    input.type = "search";
+    input.placeholder = strings.labels.filter;
+    input.value = view.filter;
+    input.addEventListener("input", () => props.onInventoryFilter(input.value));
+    let content;
+    if (view.error) {
+      content = el2("div", "banner error", [
+        el2("div", "banner-title", undefined, "Falha ao ler o inventário"),
+        el2("div", "banner-body", undefined, view.error)
+      ]);
+    } else if (view.loading && !view.data) {
+      content = empty("Lendo inventário…");
+    } else if (total === 0) {
+      content = empty(strings.empty.noInventory);
+    } else {
+      const list = el2("div", undefined);
+      for (const section2 of sections) {
+        if (section2.items.length === 0)
+          continue;
+        const rows = el2("div", "panel-card");
+        for (const item of section2.items) {
+          rows.append(el2("div", "inventory-item", [
+            el2("div", "inventory-body", [
+              el2("div", "inventory-name", undefined, item.name),
+              item.description ? el2("div", "inventory-desc", undefined, item.description) : null,
+              item.meta ? el2("div", "inventory-meta", undefined, item.meta) : null
+            ]),
+            el2("span", `diff-badge ${item.tone}`, undefined, item.status)
+          ]));
+        }
+        list.append(el2("div", "inventory-section", [
+          el2("div", "inventory-head", [
+            el2("span", "section-label", undefined, section2.label),
+            el2("span", "inventory-count", undefined, String(section2.items.length))
+          ]),
+          rows
+        ]));
+      }
+      content = list;
+    }
+    return el2("div", undefined, [input, section(1, strings.sections.inventory, content, total)]);
+  };
+  var settingsCard = (props) => {
+    const input = el2("input", "settings-input");
+    input.type = "number";
+    input.min = "0";
+    input.step = "0.01";
+    input.placeholder = "5,22";
+    input.value = props.brlInput;
+    input.addEventListener("input", () => props.onBrlInput(input.value));
+    const save = el2("button", "lens-small", undefined, strings.labels.save);
+    save.type = "button";
+    save.addEventListener("click", () => props.onSaveSettings());
+    const close = el2("button", "lens-small", undefined, strings.labels.close);
+    close.type = "button";
+    close.addEventListener("click", () => props.onSettings());
+    return el2("div", "settings-card", [
+      el2("div", "stat-label", undefined, strings.labels.rate),
+      el2("div", "settings-row", [input, save, close]),
+      el2("div", "settings-hint", undefined, "Cotação manual; 0 desliga o valor em reais.")
+    ]);
+  };
   var diffs = (snapshot, props) => {
     const view = props.diffView;
     const rows = view.rows ?? diffRows(snapshot);
@@ -2518,6 +2773,8 @@ ${GUEST_UI_LOOK_CSS}`;
   var renderPanel = (root, props) => {
     root.replaceChildren();
     root.append(header(props));
+    if (props.settingsOpen)
+      root.append(settingsCard(props));
     if (!props.hasSession) {
       root.append(empty(strings.empty.noSession, strings.empty.noSessionHint));
       return;
@@ -2531,13 +2788,17 @@ ${GUEST_UI_LOOK_CSS}`;
       return;
     }
     if (props.tab === "overview")
-      root.append(overview(props.snapshot));
+      root.append(overview(props.snapshot, props));
     else if (props.tab === "agents")
       root.append(agents(props.snapshot, props));
     else if (props.tab === "turns")
       root.append(turns(props.snapshot, props));
-    else
+    else if (props.tab === "diffs")
       root.append(diffs(props.snapshot, props));
+    else if (props.tab === "tree")
+      root.append(tree(props.snapshot, props));
+    else
+      root.append(inventory(props));
   };
 
   // src/panel/styles.ts
@@ -2674,6 +2935,51 @@ html, body {
   line-height: 1;
 }
 .lens-tab.active .lens-tab-count { background: color-mix(in srgb, var(--lens-accent-fg) 22%, transparent); }
+.lens-settings-toggle {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--lens-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--lens-muted);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.lens-settings-toggle:hover { color: var(--lens-text); border-color: var(--lens-accent); }
+.settings-card {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--lens-border);
+  border-radius: var(--lens-radius);
+  background: var(--lens-surface);
+}
+.settings-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.settings-input {
+  width: 100px;
+  padding: 4px 6px;
+  border: 1px solid var(--lens-border);
+  border-radius: 6px;
+  background: var(--lens-bg);
+  color: var(--lens-text);
+  font: inherit;
+  font-size: 11px;
+}
+.settings-hint { color: var(--lens-muted); font-size: 10px; }
+.lens-small {
+  justify-self: start;
+  padding: 3px 7px;
+  border: 1px solid var(--lens-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--lens-muted);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.lens-small:hover { color: var(--lens-text); border-color: var(--lens-accent); }
 
 .lens-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .stat-card {
@@ -3005,6 +3311,72 @@ html, body {
 .truncated { padding: 5px 10px 8px; color: var(--lens-warn-text); font-size: 10px; }
 .diff-note { padding: 6px 10px 2px; color: var(--lens-muted); font-size: 10px; }
 
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-height: 25px;
+  padding: 2px 6px;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--lens-border) 55%, transparent);
+  background: transparent;
+  color: var(--lens-text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+.tree-row:last-child { border-bottom: 0; }
+.tree-row.directory { cursor: pointer; }
+.tree-row:hover { background: var(--lens-surface-2); }
+.tree-chevron { flex: 0 0 auto; color: var(--lens-muted); transition: transform 150ms ease; }
+.tree-chevron.open { transform: rotate(90deg); }
+.tree-icon { flex: 0 0 auto; color: var(--lens-muted); }
+.tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.tree-touched { width: 5px; height: 5px; border-radius: 50%; background: var(--lens-accent); margin-left: auto; flex: 0 0 auto; }
+.tree-git { margin-left: auto; font-size: 9px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tree-git.added { color: var(--lens-ok-text); }
+.tree-git.deleted { color: var(--lens-danger-text); }
+.tree-git.modified { color: var(--lens-warn-text); }
+.tree-root { color: var(--lens-muted); font-size: 10px; font-family: var(--lens-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.inventory-filter {
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 5px 7px;
+  border: 1px solid var(--lens-border);
+  border-radius: 6px;
+  background: var(--lens-surface);
+  color: var(--lens-text);
+  font: inherit;
+  font-size: 11px;
+}
+.inventory-section { margin-bottom: 8px; }
+.inventory-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.inventory-count { color: var(--lens-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.inventory-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--lens-border) 60%, transparent);
+}
+.inventory-item:last-child { border-bottom: 0; }
+.inventory-body { min-width: 0; flex: 1; }
+.inventory-name { font-size: 11px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inventory-desc { color: var(--lens-muted); font-size: 10px; margin-top: 1px; overflow-wrap: anywhere; }
+.inventory-meta { color: var(--lens-muted); font-size: 9px; margin-top: 1px; overflow-wrap: anywhere; }
+
+.history-card { padding: 9px 10px; }
+.history-row { display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 4px 0; }
+.history-label { color: var(--lens-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+.history-value { color: var(--lens-text); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.history-empty { color: var(--lens-muted); font-size: 10px; }
+.sparkline { color: var(--lens-accent-text); overflow: visible; }
+.sparkline.muted { color: var(--lens-muted); }
+.sparkline.normal { color: var(--lens-accent-text); }
+.history-card .lens-small { margin-top: 4px; }
+
 .banner {
   padding: 9px 11px;
   margin-bottom: 12px;
@@ -3042,6 +3414,11 @@ html, body {
   .token-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .turn-detail { grid-template-columns: 1fr; }
   .detail-full { grid-column: auto; }
+}
+@media (max-width: 560px) {
+  .lens-tabs { gap: 4px; }
+  .lens-tab { height: 26px; padding: 0 8px; gap: 5px; font-size: 11px; }
+  .lens-tab-count { min-width: 14px; height: 14px; font-size: 8px; }
 }
 @media (max-width: 360px) {
   :root { --lens-pad: 12px; }
@@ -3093,6 +3470,7 @@ html, body {
 }
 .strip-status { display: inline-flex; align-items: center; gap: 4px; color: var(--lens-muted); font-size: 9px; white-space: nowrap; }
 .strip-pills { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+#root.open-panel { cursor: pointer; }
 .strip-pill { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
 .strip-pill .label { color: var(--lens-muted); font-size: 9px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
 .strip-pill .value { color: var(--lens-text); font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
@@ -3134,6 +3512,23 @@ html, body {
   var diffLoading = false;
   var diffError = null;
   var diffRequest = 0;
+  var treeRoot = null;
+  var treeEntries = {};
+  var treeLoading = false;
+  var treeError = null;
+  var treeExpanded = new Set;
+  var inventoryData = null;
+  var inventoryLoading = false;
+  var inventoryError = null;
+  var inventoryFilter = "";
+  var historyPoints = [];
+  var historyError = null;
+  var lastHistoryAt = 0;
+  var settingsOpen = false;
+  var brlRate = 0;
+  var brlInput = "";
+  var confirmingClear = false;
+  var clearTimer = null;
   var confirmingStop = null;
   var confirmTimer = null;
   var stoppingAgents = new Set;
@@ -3153,6 +3548,20 @@ html, body {
     loading: diffLoading,
     error: diffError
   });
+  var treeView = () => ({
+    root: treeRoot,
+    entries: treeEntries,
+    expanded: treeExpanded,
+    loading: treeLoading,
+    error: treeError
+  });
+  var inventoryView = () => ({
+    data: inventoryData,
+    loading: inventoryLoading,
+    error: inventoryError,
+    filter: inventoryFilter
+  });
+  var historyView = () => ({ points: historyPoints, error: historyError });
   var clearConfirm = () => {
     if (confirmTimer)
       clearTimeout(confirmTimer);
@@ -3208,6 +3617,13 @@ html, body {
       expandedTurns,
       expandedDiffs,
       diffView: diffView(),
+      tree: treeView(),
+      inventory: inventoryView(),
+      history: historyView(),
+      brlRate,
+      settingsOpen,
+      brlInput,
+      confirmingClear,
       stoppingAgents,
       confirmingStop,
       onTab: (next) => {
@@ -3215,6 +3631,12 @@ html, body {
         render();
         if (next === "diffs" && diffSource !== "session")
           loadDiff();
+        else if (next === "tree")
+          loadTree();
+        else if (next === "inventory")
+          loadInventory();
+        else if (next === "overview" && Date.now() - lastHistoryAt > 1e4)
+          loadHistory();
         else
           poll();
       },
@@ -3256,7 +3678,38 @@ html, body {
         else
           expandedDiffs.add(path);
         render();
-      }
+      },
+      onTreeToggle: (path) => {
+        if (treeExpanded.has(path)) {
+          treeExpanded.delete(path);
+          render();
+        } else {
+          treeExpanded.add(path);
+          render();
+          if (!treeEntries[path])
+            loadTree(path);
+        }
+      },
+      onInventoryFilter: (value) => {
+        inventoryFilter = value;
+        render();
+        const input = root.querySelector(".inventory-filter");
+        if (input) {
+          input.focus();
+          input.setSelectionRange(value.length, value.length);
+        }
+      },
+      onSettings: () => {
+        settingsOpen = !settingsOpen;
+        render();
+      },
+      onBrlInput: (value) => {
+        brlInput = value;
+      },
+      onSaveSettings: () => {
+        saveSettings();
+      },
+      onClearHistory: askClearHistory
     });
   };
   var reset = () => {
@@ -3271,6 +3724,22 @@ html, body {
     diffLoading = false;
     diffError = null;
     diffRequest += 1;
+    treeRoot = null;
+    treeEntries = {};
+    treeExpanded.clear();
+    treeLoading = false;
+    treeError = null;
+    inventoryData = null;
+    inventoryLoading = false;
+    inventoryError = null;
+    inventoryFilter = "";
+    historyPoints = [];
+    historyError = null;
+    lastHistoryAt = 0;
+    confirmingClear = false;
+    if (clearTimer)
+      clearTimeout(clearTimer);
+    clearTimer = null;
     stoppingAgents.clear();
     clearConfirm();
     render();
@@ -3294,6 +3763,8 @@ html, body {
         error = result.error ?? { code: "bad-answer", message: "Sem dados do serviço." };
       }
       render();
+      if (tab === "overview" && Date.now() - lastHistoryAt > 1e4)
+        loadHistory();
     } finally {
       inFlight = false;
     }
@@ -3354,11 +3825,131 @@ html, body {
     if (id)
       poll();
   };
+  var loadTree = async (key = ".", force = false) => {
+    if (!sessionId)
+      return;
+    if (!force && treeEntries[key])
+      return;
+    const wanted = sessionId;
+    treeLoading = true;
+    treeError = null;
+    render();
+    try {
+      const result = await requestTree(host, wanted, key === "." ? undefined : key);
+      if (sessionId !== wanted)
+        return;
+      if (result.data) {
+        treeRoot = result.data.root;
+        treeEntries = { ...treeEntries, [key]: result.data.entries };
+      } else {
+        treeError = result.error?.message ?? "Não foi possível ler a árvore.";
+      }
+    } finally {
+      treeLoading = false;
+      render();
+    }
+  };
+  var loadInventory = async (force = false) => {
+    if (!sessionId || inventoryData && !force)
+      return;
+    const wanted = sessionId;
+    inventoryLoading = true;
+    inventoryError = null;
+    render();
+    try {
+      const result = await requestInventory(host, wanted);
+      if (sessionId !== wanted)
+        return;
+      if (result.data) {
+        inventoryData = result.data;
+      } else {
+        inventoryError = result.error?.message ?? "Não foi possível ler o inventário.";
+      }
+    } finally {
+      inventoryLoading = false;
+      render();
+    }
+  };
+  var loadHistory = async () => {
+    if (!sessionId)
+      return;
+    const wanted = sessionId;
+    lastHistoryAt = Date.now();
+    try {
+      const result = await requestHistory(host, wanted);
+      if (sessionId !== wanted)
+        return;
+      if (result.data) {
+        historyPoints = result.data;
+        historyError = null;
+      } else {
+        historyError = result.error?.message ?? null;
+      }
+      render();
+    } catch {}
+  };
+  var loadSettings = async () => {
+    try {
+      const stored = await host.storage.get("settings");
+      if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+        const rate = stored.brlRate;
+        if (typeof rate === "number" && Number.isFinite(rate) && rate > 0) {
+          brlRate = rate;
+          brlInput = String(rate);
+        }
+      }
+    } catch {}
+    render();
+  };
+  var saveSettings = async () => {
+    const rate = Number(brlInput.replace(",", "."));
+    brlRate = Number.isFinite(rate) && rate > 0 ? Math.min(100, rate) : 0;
+    brlInput = brlRate > 0 ? String(brlRate) : "";
+    settingsOpen = false;
+    render();
+    try {
+      await host.storage.set("settings", { brlRate });
+      await host.toast({ kind: "success", message: "Cotação salva." });
+    } catch {
+      await host.toast({ kind: "error", message: "Não foi possível salvar a cotação." });
+    }
+  };
+  var askClearHistory = () => {
+    if (clearTimer)
+      clearTimeout(clearTimer);
+    if (!confirmingClear) {
+      confirmingClear = true;
+      render();
+      clearTimer = setTimeout(() => {
+        confirmingClear = false;
+        clearTimer = null;
+        render();
+      }, 4000);
+      return;
+    }
+    confirmingClear = false;
+    clearTimer = null;
+    render();
+    if (!sessionId)
+      return;
+    clearHistory(host, sessionId).then((result) => {
+      if (result.data) {
+        historyPoints = [];
+        historyError = null;
+        render();
+        host.toast({ kind: "success", message: "Histórico limpo." });
+      } else {
+        host.toast({ kind: "error", message: result.error?.message ?? "Não foi possível limpar." });
+      }
+    });
+  };
   var mount = () => {
     if (mounted)
       return;
     mounted = true;
     render();
+    loadSettings();
+    loadHistory();
     setInterval(() => {
       if (visible())
         poll();
@@ -3383,6 +3974,12 @@ html, body {
   host.onSessionLifecycle((event) => {
     if (event.sessionId === sessionId)
       poll();
+  });
+  host.onResolve(async ({ command }) => {
+    if (command !== "lens")
+      return null;
+    await host.openSurface("plugin:lens");
+    return null;
   });
   mount();
   poll();

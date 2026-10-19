@@ -5,7 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createLensService, type LensService } from '../src/service/app.ts';
-import type { LensDiffFile, LensGitDiff, LensSnapshot, LensStrip } from '../src/shared/types.ts';
+import type {
+  LensDiffFile,
+  LensGitDiff,
+  LensHistoryPoint,
+  LensInventory,
+  LensSnapshot,
+  LensStrip,
+  LensTree,
+} from '../src/shared/types.ts';
 import {
   active,
   childMessages,
@@ -154,6 +162,46 @@ const createFakeUpstream = async (options: { auth?: boolean; partial?: boolean }
           { path: 'd.ts', index: 'M', working_dir: ' ' },
         ],
       });
+      return;
+    }
+    if (url.pathname === '/api/fs/list') {
+      const target = url.searchParams.get('path') ?? '';
+      json(res, {
+        path: target,
+        entries:
+          target === '/projeto'
+            ? [
+                { name: 'src', path: '/projeto/src', isDirectory: true, isFile: false },
+                { name: 'a.ts', path: '/projeto/a.ts', isDirectory: false, isFile: true },
+              ]
+            : target === '/projeto/src'
+              ? [{ name: 'b.ts', path: '/projeto/src/b.ts', isDirectory: false, isFile: true }]
+              : [],
+      });
+      return;
+    }
+    if (url.pathname === '/api/agent') {
+      json(res, {
+        data: [
+          { id: 'build', name: 'Build', mode: 'primary', model: { id: 'm', providerID: 'p' }, description: 'agente', hidden: false },
+        ],
+      });
+      return;
+    }
+    if (url.pathname === '/api/command') {
+      json(res, { data: [{ name: 'review', description: 'revisar' }] });
+      return;
+    }
+    if (url.pathname === '/api/skill') {
+      json(res, { data: [{ id: 'skill', name: 'Skill', description: 'desc', path: '/skill.md', content: 'SECRET' }] });
+      return;
+    }
+    if (url.pathname === '/api/plugin') {
+      json(res, { data: [{ id: 'plugin', source: { type: 'builtin' }, state: { status: 'active' } }] });
+      return;
+    }
+    if (url.pathname === '/api/mcp') {
+      json(res, { data: [{ name: 'mcp', status: { status: 'connected' } }] });
       return;
     }
     if (url.pathname === '/api/git/diff') {
@@ -397,5 +445,65 @@ describe('Lens service', () => {
     expect(result.error).toBeNull();
     expect(result.data?.map((file) => file.path)).toContain('/projeto/a.ts');
     expect(result.data?.[0]?.additions).toBe(1);
+  });
+
+  test('lists a project directory for the tree', async () => {
+    const upstream = await createFakeUpstream();
+    upstreams.push(upstream);
+    const { base } = await startService({ baseUrl: upstream.url });
+
+    const result = await getJson<LensTree>(base, '/tree?sessionId=ses_root');
+    expect(result.error).toBeNull();
+    expect(result.data?.path).toBe('.');
+    expect(result.data?.entries.map((entry) => entry.name)).toEqual(['src', 'a.ts']);
+
+    const child = await getJson<LensTree>(base, '/tree?sessionId=ses_root&path=src');
+    expect(child.data?.entries.map((entry) => entry.name)).toEqual(['b.ts']);
+  });
+
+  test('refuses a tree path outside the project', async () => {
+    const upstream = await createFakeUpstream();
+    upstreams.push(upstream);
+    const { base } = await startService({ baseUrl: upstream.url });
+
+    const result = await getJson<LensTree>(base, '/tree?sessionId=ses_root&path=../secret');
+    expect(result.data).toBeNull();
+    expect(result.error?.code).toBe('bad-answer');
+  });
+
+  test('serves inventory metadata without skill content', async () => {
+    const upstream = await createFakeUpstream();
+    upstreams.push(upstream);
+    const { base } = await startService({ baseUrl: upstream.url });
+
+    const result = await getJson<LensInventory>(base, '/inventory?sessionId=ses_root');
+    expect(result.error).toBeNull();
+    expect(result.data?.sections.map((section) => section.id)).toEqual([
+      'agents',
+      'commands',
+      'skills',
+      'mcp',
+      'plugins',
+    ]);
+    expect(JSON.stringify(result.data)).not.toContain('SECRET');
+  });
+
+  test('persists and clears session history', async () => {
+    const upstream = await createFakeUpstream();
+    upstreams.push(upstream);
+    const { base } = await startService({ baseUrl: upstream.url });
+
+    await getJson<LensSnapshot>(base, '/snapshot?sessionId=ses_root');
+    const history = await getJson<LensHistoryPoint[]>(base, '/history?sessionId=ses_root');
+    expect(history.error).toBeNull();
+    expect(history.data?.length).toBeGreaterThan(0);
+
+    const cleared = await fetch(`${base}/history?sessionId=ses_root`, {
+      method: 'DELETE',
+      headers: { authorization: 'Bearer test-token' },
+    });
+    expect(cleared.status).toBe(200);
+    const empty = await getJson<LensHistoryPoint[]>(base, '/history?sessionId=ses_root');
+    expect(empty.data).toEqual([]);
   });
 });

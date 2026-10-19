@@ -2,12 +2,14 @@ import type {
   LensErrorCode,
   RawActive,
   RawDiff,
+  RawFsList,
   RawGitDiff,
   RawGitStatus,
   RawMessage,
   RawModel,
   RawSession,
 } from '../shared/types.ts';
+import type { DiscoveryAuth } from './discovery.ts';
 
 export class UpstreamError extends Error {
   constructor(
@@ -50,7 +52,44 @@ export class UpstreamClient {
     readonly baseUrl: string,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly now: () => number = Date.now,
+    private readonly auth: DiscoveryAuth | null = null,
   ) {}
+
+  private cookie: string | null = null;
+  private authPromise: Promise<Record<string, string>> | null = null;
+
+  async authHeaders(): Promise<Record<string, string>> {
+    if (!this.auth) return {};
+    if (this.auth.kind === 'bearer') return { authorization: `Bearer ${this.auth.token}` };
+    if (this.cookie) return { cookie: this.cookie };
+    if (this.authPromise) return this.authPromise;
+
+    this.authPromise = (async () => {
+      const response = await this.fetchImpl(new URL('/auth/session', this.baseUrl), {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({ password: this.auth && this.auth.kind === 'password' ? this.auth.password : '' }),
+        signal: AbortSignal.timeout(5_000),
+      }).catch(() => null);
+
+      if (!response || !response.ok) {
+        throw new UpstreamError('auth-required', 'O servidor local recusou a senha de acesso.');
+      }
+
+      const cookies = response.headers.getSetCookie?.() ?? [];
+      const raw = response.headers.get('set-cookie') ?? '';
+      const match = [...cookies, raw]
+        .join(';')
+        .match(/oc_ui_session(?:_\d+)?=[^;]+/);
+      if (!match) throw new UpstreamError('auth-required', 'O servidor local não devolveu uma sessão.');
+      this.cookie = match[0];
+      return { cookie: this.cookie };
+    })().finally(() => {
+      this.authPromise = null;
+    });
+
+    return this.authPromise;
+  }
 
   private async raw<T>(
     requestPath: string,
@@ -63,16 +102,19 @@ export class UpstreamClient {
     let response: Response;
     try {
       const method = options?.method ?? 'GET';
+      const auth = await this.authHeaders();
       response = await this.fetchImpl(url, {
         method,
         headers: {
           accept: 'application/json',
           ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
+          ...auth,
         },
         ...(options?.body !== undefined ? { body: options.body } : {}),
         signal: AbortSignal.timeout(5_000),
       });
     } catch (error) {
+      if (error instanceof UpstreamError) throw error;
       throw new UpstreamError(
         'upstream-failed',
         error instanceof Error ? error.message : 'Falha ao falar com o servidor local.',
@@ -238,6 +280,14 @@ export class UpstreamClient {
       path,
       ...(staged ? { staged: 'true' } : {}),
     });
+  }
+
+  async getFsList(path: string): Promise<RawFsList> {
+    return this.raw<RawFsList>('/api/fs/list', { path });
+  }
+
+  async getData<T>(path: string, query?: Record<string, string>): Promise<T> {
+    return this.data<T>(path, query);
   }
 
   invalidate(sessionId?: string): void {

@@ -15,6 +15,12 @@ const style = document.createElement('style');
 style.textContent = STATUS_STYLE;
 document.head.append(style);
 
+root.classList.add('open-panel');
+root.title = 'Abrir o painel Lens';
+root.addEventListener('click', () => {
+  void host.openSurface('plugin:lens').catch(() => undefined);
+});
+
 let sessionId: string | null = null;
 let strip: LensStrip | null = null;
 let error: Failure | null = null;

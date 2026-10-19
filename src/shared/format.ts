@@ -12,6 +12,13 @@ export const formatUsd = (value: number | null | undefined): string => {
   return `US$ ${value.toFixed(digits).replace('.', ',')}`;
 };
 
+export const formatBrl = (usd: number | null | undefined, rate: number): string => {
+  if (usd === null || usd === undefined || !Number.isFinite(usd) || !Number.isFinite(rate) || rate <= 0) {
+    return '—';
+  }
+  return `R$ ${(usd * rate).toFixed(2).replace('.', ',')}`;
+};
+
 export const formatPercent = (value: number | null | undefined): string => {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—';
   return `${value.toFixed(value % 1 === 0 ? 0 : 1).replace('.', ',')}%`;

@@ -35,18 +35,35 @@ export const loopbackUrl = (value: string | null | undefined): string | null => 
   }
 };
 
+export type DiscoveryAuth =
+  | { kind: 'bearer'; token: string }
+  | { kind: 'password'; password: string };
+
+export type DiscoveredServer = {
+  baseUrl: string;
+  auth: DiscoveryAuth | null;
+};
+
 export type DiscoveryInput = {
   dataDir: string;
   explicit?: string | null;
 };
 
-export const discoverBaseUrl = async ({ dataDir, explicit }: DiscoveryInput): Promise<string | null> => {
+export const discoverServer = async ({ dataDir, explicit }: DiscoveryInput): Promise<DiscoveredServer | null> => {
   const override = loopbackUrl(explicit ?? process.env.LENS_BASE_URL ?? null);
-  if (override) return override;
+  if (override) return { baseUrl: override, auth: null };
 
   const settings = await readJson(path.join(dataDir, 'settings.json'));
   const desktopPort = portOf(settings?.desktopLocalPort);
-  if (desktopPort) return `http://127.0.0.1:${desktopPort}`;
+  if (desktopPort) {
+    const token = typeof settings?.desktopLocalClientToken === 'string'
+      ? settings.desktopLocalClientToken.trim()
+      : '';
+    return {
+      baseUrl: `http://127.0.0.1:${desktopPort}`,
+      auth: token ? { kind: 'bearer', token } : null,
+    };
+  }
 
   const runDir = path.join(dataDir, 'run');
   let files: string[] = [];
@@ -58,16 +75,28 @@ export const discoverBaseUrl = async ({ dataDir, explicit }: DiscoveryInput): Pr
     return null;
   }
 
-  const candidates: Array<{ url: string; mtime: number }> = [];
+  const candidates: Array<{ server: DiscoveredServer; mtime: number }> = [];
   for (const file of files) {
     const full = path.join(runDir, file);
     const parsed = await readJson(full);
     const port = portOf(parsed?.port);
     if (!port) continue;
+    const password = typeof parsed?.uiPassword === 'string' ? parsed.uiPassword : '';
     const info = await stat(full).catch(() => null);
-    candidates.push({ url: `http://127.0.0.1:${port}`, mtime: info?.mtimeMs ?? 0 });
+    candidates.push({
+      server: {
+        baseUrl: `http://127.0.0.1:${port}`,
+        auth: password ? { kind: 'password', password } : null,
+      },
+      mtime: info?.mtimeMs ?? 0,
+    });
   }
 
   candidates.sort((a, b) => b.mtime - a.mtime);
-  return candidates[0]?.url ?? null;
+  return candidates[0]?.server ?? null;
+};
+
+export const discoverBaseUrl = async (input: DiscoveryInput): Promise<string | null> => {
+  const server = await discoverServer(input);
+  return server?.baseUrl ?? null;
 };
