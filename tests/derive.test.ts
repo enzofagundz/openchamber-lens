@@ -5,6 +5,7 @@ import {
   buildStrip,
   deriveDiff,
   deriveRecentFiles,
+  deriveTurnDiff,
   deriveTurns,
   descendantSessions,
   tokensOf,
@@ -118,6 +119,72 @@ describe('deriveRecentFiles', () => {
     const files = deriveRecentFiles(rootMessages);
     expect(files[0]).toMatchObject({ path: '/projeto/a.ts', action: 'edit' });
     expect(files.some((file) => file.path === '/projeto/b.ts')).toBe(true);
+  });
+});
+
+describe('deriveTurnDiff', () => {
+  const patch = 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+novo\n';
+  const messages = [
+    { id: 'u1', type: 'user', text: 'primeiro', time: { created: 1_000 } },
+    {
+      id: 'a1',
+      type: 'assistant',
+      time: { created: 1_100, completed: 1_200 },
+      content: [
+        {
+          type: 'tool',
+          name: 'edit',
+          state: {
+            status: 'completed',
+            input: { path: '/projeto/a.ts' },
+            metadata: { files: [{ file: '/projeto/a.ts', patch }] },
+          },
+        },
+        {
+          type: 'tool',
+          name: 'write',
+          state: { status: 'completed', input: { path: '/projeto/b.ts', content: 'x' }, metadata: {} },
+        },
+      ],
+    },
+    { id: 'u2', type: 'user', text: 'segundo', time: { created: 2_000 } },
+    { id: 'a2', type: 'assistant', time: { created: 2_100, completed: 2_200 }, content: [] },
+  ] satisfies import('../src/shared/types.ts').RawMessage[];
+
+  test('uses tool metadata patches for a turn', () => {
+    const files = deriveTurnDiff(messages, 1);
+    expect(files.map((file) => file.path)).toEqual(['/projeto/a.ts', '/projeto/b.ts']);
+    expect(files[0]?.additions).toBe(1);
+    expect(files[0]?.deletions).toBe(1);
+    expect(files[1]?.note).toContain('write');
+  });
+
+  test('falls back to old/new strings when metadata is absent', () => {
+    const fallback = [
+      { id: 'u1', type: 'user', text: 'pedido', time: { created: 1_000 } },
+      {
+        id: 'a1',
+        type: 'assistant',
+        time: { created: 1_100, completed: 1_200 },
+        content: [
+          {
+            type: 'tool',
+            name: 'edit',
+            state: {
+              status: 'completed',
+              input: { path: '/projeto/a.ts', oldString: 'velho', newString: 'novo' },
+            },
+          },
+        ],
+      },
+    ] satisfies import('../src/shared/types.ts').RawMessage[];
+    const files = deriveTurnDiff(fallback, 1);
+    expect(files[0]?.patch).toContain('+novo');
+    expect(files[0]?.additions).toBe(1);
+  });
+
+  test('returns nothing for an unknown turn', () => {
+    expect(deriveTurnDiff(messages, 9)).toEqual([]);
   });
 });
 

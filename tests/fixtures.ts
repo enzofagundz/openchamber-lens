@@ -74,7 +74,18 @@ export const rootMessages: RawMessage[] = [
       {
         type: 'tool',
         name: 'read',
-        state: { status: 'completed', input: { path: '/projeto/a.ts' } },
+        state: {
+          status: 'completed',
+          input: { path: '/projeto/a.ts' },
+          metadata: {
+            files: [
+              {
+                file: '/projeto/a.ts',
+                patch: 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+              },
+            ],
+          },
+        },
         time: { created: 1_150 },
       },
       {

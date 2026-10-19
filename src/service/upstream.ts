@@ -2,6 +2,8 @@ import type {
   LensErrorCode,
   RawActive,
   RawDiff,
+  RawGitDiff,
+  RawGitStatus,
   RawMessage,
   RawModel,
   RawSession,
@@ -50,15 +52,24 @@ export class UpstreamClient {
     private readonly now: () => number = Date.now,
   ) {}
 
-  private async raw<T>(requestPath: string, query?: Record<string, string>): Promise<T> {
+  private async raw<T>(
+    requestPath: string,
+    query?: Record<string, string>,
+    options?: { method?: 'GET' | 'POST'; body?: string },
+  ): Promise<T> {
     const url = new URL(requestPath, this.baseUrl);
     for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
 
     let response: Response;
     try {
+      const method = options?.method ?? 'GET';
       response = await this.fetchImpl(url, {
-        method: 'GET',
-        headers: { accept: 'application/json' },
+        method,
+        headers: {
+          accept: 'application/json',
+          ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
+        },
+        ...(options?.body !== undefined ? { body: options.body } : {}),
         signal: AbortSignal.timeout(5_000),
       });
     } catch (error) {
@@ -206,6 +217,27 @@ export class UpstreamClient {
     }
     this.activeCache = { value: active, at: current };
     return active;
+  }
+
+  async interrupt(id: string): Promise<boolean> {
+    const result = await this.raw<{ interrupted?: boolean }>(
+      `/api/session/${encodeURIComponent(id)}/interrupt`,
+      undefined,
+      { method: 'POST', body: '{}' },
+    );
+    return result?.interrupted === true;
+  }
+
+  async getGitStatus(directory: string): Promise<RawGitStatus> {
+    return this.raw<RawGitStatus>('/api/git/status', { directory });
+  }
+
+  async getGitDiff(directory: string, path: string, staged = false): Promise<RawGitDiff> {
+    return this.raw<RawGitDiff>('/api/git/diff', {
+      directory,
+      path,
+      ...(staged ? { staged: 'true' } : {}),
+    });
   }
 
   invalidate(sessionId?: string): void {

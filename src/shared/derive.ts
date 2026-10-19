@@ -42,6 +42,10 @@ const NOISE_PREFIXES = [
 const number = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');
 const time = (value: number | undefined): number | null => (typeof value === 'number' ? value : null);
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 
 export const tokensOf = (raw?: RawTokens): LensTokens => ({
   input: number(raw?.input),
@@ -347,6 +351,80 @@ export const deriveDiff = (raw: RawDiff[]): LensDiffFile[] => {
         truncated: clipped,
       };
     });
+};
+
+const metadataPatches = (part: RawPart): RawDiff[] => {
+  const metadata = asRecord(part.state?.metadata);
+  const files = metadata?.files;
+  if (!Array.isArray(files)) return [];
+  return files.flatMap((entry) => {
+    const file = asRecord(entry);
+    if (!file || typeof file.file !== 'string') return [];
+    return [{ file: file.file, patch: text(file.patch) }];
+  });
+};
+
+const editPatch = (input: Record<string, unknown>, path: string): string => {
+  const oldString = text(input.oldString);
+  const newString = text(input.newString);
+  if (!oldString && !newString) return '';
+  const oldLines = oldString.split('\n').map((line) => `-${line}`);
+  const newLines = newString.split('\n').map((line) => `+${line}`);
+  return [`--- a/${path}`, `+++ b/${path}`, '@@ -1 +1 @@', ...oldLines, ...newLines].join('\n');
+};
+
+export const deriveTurnDiff = (messages: RawMessage[], turnIndex: number): LensDiffFile[] => {
+  const ordered = orderedMessages(messages);
+  const starts = ordered
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => message.type === 'user' && messageText(message).trim().length > 0)
+    .map(({ index }) => index);
+  const start = starts[turnIndex - 1];
+  if (start === undefined) return [];
+  const end = starts[turnIndex] ?? ordered.length;
+  const slice = ordered.slice(start, end);
+
+  const patches = new Map<string, string>();
+  const notes = new Map<string, string>();
+
+  for (const message of slice) {
+    if (message.type !== 'assistant') continue;
+    for (const part of message.content ?? []) {
+      if (!isToolPart(part)) continue;
+      const name = text(part.name);
+      const input = asRecord(part.state?.input) ?? {};
+      const fromMetadata = metadataPatches(part);
+      if (fromMetadata.length > 0) {
+        for (const entry of fromMetadata) {
+          if (entry.file) patches.set(entry.file, entry.patch ?? '');
+        }
+        continue;
+      }
+
+      const path = typeof input.path === 'string' ? input.path : typeof input.file_path === 'string' ? input.file_path : null;
+      if (!path) continue;
+
+      if (name === 'edit') {
+        const patch = editPatch(input, path);
+        if (patch) patches.set(path, patch);
+        continue;
+      }
+      if (name === 'patch' || name === 'apply_patch') {
+        const patch = text(input.patch) || text(input.text);
+        if (patch) patches.set(path, patch);
+        continue;
+      }
+      if (name === 'write') {
+        if (!patches.has(path)) patches.set(path, '');
+        notes.set(path, 'write: diff indisponível');
+      }
+    }
+  }
+
+  return deriveDiff([...patches].map(([file, patch]) => ({ file, patch }))).map((file) => ({
+    ...file,
+    ...(notes.has(file.path) ? { note: notes.get(file.path) } : {}),
+  }));
 };
 
 const pathFromPart = (part: RawPart): string | null => {

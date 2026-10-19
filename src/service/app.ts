@@ -1,11 +1,14 @@
 import http from 'node:http';
 
-import { buildSnapshot, buildStrip, descendantSessions } from '../shared/derive.ts';
+import { buildSnapshot, buildStrip, deriveDiff, deriveTurnDiff, descendantSessions } from '../shared/derive.ts';
 import type {
+  LensDiffFile,
   LensError,
   LensErrorCode,
+  LensGitDiff,
   RawActive,
   RawDiff,
+  RawGitStatus,
   RawMessage,
   RawModel,
   RawSession,
@@ -38,6 +41,8 @@ export type LensService = {
 
 const MAX_CHILD_MESSAGES = 12;
 const MESSAGES_FOR_STRIP = 20;
+const GIT_FILE_LIMIT = 100;
+const BODY_LIMIT = 16_384;
 
 const errorOf = (code: LensErrorCode, message: string): LensError => ({ code, message });
 
@@ -52,6 +57,33 @@ const soft = async <T>(work: Promise<T>, fallback: T): Promise<T> => {
     return fallback;
   }
 };
+
+const readBody = (req: http.IncomingMessage): Promise<unknown> =>
+  new Promise((resolve, reject) => {
+    let raw = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => {
+      raw += chunk;
+      if (raw.length > BODY_LIMIT) {
+        reject(new UpstreamError('bad-answer', 'Corpo da requisição grande demais.'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      if (raw.trim() === '') return resolve({});
+      try {
+        resolve(JSON.parse(raw) as unknown);
+      } catch {
+        reject(new UpstreamError('bad-answer', 'Corpo da requisição inválido.'));
+      }
+    });
+    req.on('error', reject);
+  });
+
+const recordOf = (value: unknown): Record<string, unknown> | null =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 
 export const createLensService = (config: LensServiceConfig): LensService => {
   const now = config.now ?? Date.now;
@@ -171,6 +203,103 @@ export const createLensService = (config: LensServiceConfig): LensService => {
     return { data: snapshot, error: null };
   };
 
+  const gitDiff = async (sessionId: string): Promise<{ data: LensGitDiff | null; error: LensError | null }> => {
+    const client = await resolveUpstream();
+    const session = await client.getSession(sessionId);
+    const directory = session.location?.directory;
+    if (!directory) throw new UpstreamError('bad-answer', 'Sessão sem diretório de projeto.');
+
+    let status: RawGitStatus;
+    try {
+      status = await client.getGitStatus(directory);
+    } catch (error) {
+      if (
+        error instanceof UpstreamError &&
+        error.code === 'upstream-failed' &&
+        /400/.test(error.message)
+      ) {
+        throw new UpstreamError('not-git', 'A sessão atual não está dentro de um repositório Git.');
+      }
+      throw error;
+    }
+
+    const files = (status.files ?? [])
+      .filter((file) => typeof file.path === 'string' && file.path.length > 0)
+      .slice(0, GIT_FILE_LIMIT);
+
+    const raw: RawDiff[] = [];
+    for (const file of files) {
+      const path = file.path as string;
+      const staged = typeof file.index === 'string' && ![' ', '?'].includes(file.index);
+      const working =
+        typeof file.working_dir === 'string' && ![' ', '?'].includes(file.working_dir);
+      const untracked = file.index === '?' || file.working_dir === '?';
+      const patches: string[] = [];
+
+      if (staged) {
+        const diff = await client.getGitDiff(directory, path, true).catch((error: unknown) => {
+          if (isAuth(error)) throw error;
+          return null;
+        });
+        if (diff?.diff) patches.push(diff.diff);
+      }
+      if (working || untracked || !staged) {
+        const diff = await client.getGitDiff(directory, path).catch((error: unknown) => {
+          if (isAuth(error)) throw error;
+          return null;
+        });
+        if (diff?.diff) patches.push(diff.diff);
+      }
+
+      raw.push({ file: path, patch: patches.join('\n') });
+    }
+
+    return {
+      data: {
+        branch: status.current ?? null,
+        tracking: status.tracking ?? null,
+        ahead: status.ahead ?? 0,
+        behind: status.behind ?? 0,
+        clean: Boolean(status.isClean),
+        files: deriveDiff(raw),
+      },
+      error: null,
+    };
+  };
+
+  const turnDiff = async (sessionId: string, turn: number): Promise<{ data: LensDiffFile[] | null; error: LensError | null }> => {
+    const client = await resolveUpstream();
+    const messages = await client.getConversation(sessionId);
+    return { data: deriveTurnDiff(messages, turn), error: null };
+  };
+
+  const interrupt = async (
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> => {
+    const body = recordOf(await readBody(req));
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
+    const parentId = typeof body?.parentId === 'string' ? body.parentId.trim() : '';
+    if (!sessionId || !parentId) {
+      send(res, 200, { data: null, error: errorOf('bad-answer', 'sessionId e parentId são obrigatórios.') });
+      return;
+    }
+
+    const client = await resolveUpstream();
+    const session = await client.getSession(sessionId);
+    const sessions = await client.listSessions();
+    const isChild = session.parentID !== null && session.parentID !== undefined;
+    const isDescendant = descendantSessions(parentId, sessions).some((child) => child.id === sessionId);
+    if (!isChild || !isDescendant) {
+      send(res, 200, { data: null, error: errorOf('forbidden', 'Só subagentes da sessão atual podem ser interrompidos.') });
+      return;
+    }
+
+    const interrupted = await client.interrupt(sessionId);
+    client.invalidate(sessionId);
+    send(res, 200, { data: { interrupted }, error: null });
+  };
+
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
     touch();
 
@@ -180,6 +309,19 @@ export const createLensService = (config: LensServiceConfig): LensService => {
     }
 
     const url = new URL(req.url ?? '/', `http://${host}`);
+
+    if (req.method === 'POST' && url.pathname === '/interrupt') {
+      try {
+        await interrupt(req, res);
+      } catch (error) {
+        send(res, 200, {
+          data: null,
+          error: error instanceof UpstreamError ? errorOf(error.code, error.message) : errorOf('upstream-failed', 'Falha ao interromper.'),
+        });
+      }
+      return;
+    }
+
     if (req.method !== 'GET') {
       send(res, 405, { data: null, error: errorOf('bad-answer', 'Método não permitido.') });
       return;
@@ -190,7 +332,8 @@ export const createLensService = (config: LensServiceConfig): LensService => {
       return;
     }
 
-    if (url.pathname !== '/snapshot' && url.pathname !== '/strip') {
+    const supported = new Set(['/snapshot', '/strip', '/git-diff', '/turn-diff']);
+    if (!supported.has(url.pathname)) {
       send(res, 404, { data: null, error: errorOf('bad-answer', 'Rota desconhecida.') });
       return;
     }
@@ -202,6 +345,19 @@ export const createLensService = (config: LensServiceConfig): LensService => {
     }
 
     try {
+      if (url.pathname === '/git-diff') {
+        send(res, 200, await gitDiff(sessionId));
+        return;
+      }
+      if (url.pathname === '/turn-diff') {
+        const turn = Number(url.searchParams.get('turn'));
+        if (!Number.isInteger(turn) || turn <= 0) {
+          send(res, 200, { data: null, error: errorOf('bad-answer', 'turn inválido.') });
+          return;
+        }
+        send(res, 200, await turnDiff(sessionId, turn));
+        return;
+      }
       const result = await build(sessionId, url.pathname === '/strip');
       send(res, 200, result);
     } catch (error) {

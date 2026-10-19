@@ -11,7 +11,7 @@ Painel de observação de sessão para o [OpenChamber](https://openchamber.dev).
 | Visão geral | contexto usado/limite, custo, tokens (entrada, saída, raciocínio, cache), modelo, duração, ferramentas, falhas e arquivos recentes |
 | Agentes | conversa principal e todos os subagentes, aninhados por `parentID`, com modelo, status, custo, tokens e ferramentas |
 | Turnos | agrupamento por pedido do usuário, com duração, custo, ferramentas, falhas e subagentes |
-| Diffs | arquivos alterados pela sessão, com adições/remoções e patch expansível |
+| Diffs | arquivos alterados pela sessão, por turno ou pelo working tree do Git, com adições/remoções e patch expansível |
 
 A extensão também adiciona a seção **Lens** ao painel Work Status: contexto, custo, agentes rodando, modelo e arquivos alterados.
 
@@ -31,16 +31,16 @@ O Lens lê o servidor local do OpenChamber em `127.0.0.1`. A porta vem de `setti
 
 ## O que o Lens lê
 
-Somente `GET` no servidor local do OpenChamber:
+`GET` no servidor local do OpenChamber:
 
 - lista de sessões e sessões filhas;
 - mensagens da sessão;
-- diff da sessão;
+- diff da sessão, do turno e do working tree do Git;
 - catálogo de modelos, para o limite de contexto;
 - mapa de sessões ativas;
 - fluxo SSE `/api/event`, para invalidar o cache.
 
-O Lens **não escreve** em arquivos do projeto, **não guarda segredos**, **não executa comandos** e **não para nem altera agentes**. A única capacidade pedida é `sessions`, usada para abrir a sessão de um subagente quando você clica nele.
+A única ação de escrita é `POST /interrupt`, para pedir a parada de um subagente. O Lens **não escreve** em arquivos do projeto, **não guarda segredos** e **não executa comandos**. A única capacidade pedida é `sessions`, usada para abrir a sessão de um subagente quando você clica nele.
 
 ## Desenvolver
 
@@ -73,9 +73,10 @@ Estrutura:
 ## Limitações conhecidas
 
 - Instância remota ou com senha: o serviço não autentica; o painel mostra um aviso explícito.
-- O diff vem da sessão; não há diff por turno nem do working tree do git.
+- O stop interrompe apenas subagentes da sessão atual, com confirmação; o agente principal nunca é interrompido pelo Lens.
+- O diff por turno é melhor esforço: `edit`/`patch` trazem patch; `write` aparece como “diff indisponível”.
 - Sem histórico persistido: ao reabrir, o Lens recarrega o estado atual.
-- Sem parar agente, sem árvore de arquivos e sem inventário de plugins. Isso fica para uma próxima versão.
+- Sem árvore de arquivos e sem inventário de plugins. Isso fica para uma próxima versão.
 
 ## Licença
 

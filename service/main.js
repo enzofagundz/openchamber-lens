@@ -26,6 +26,7 @@ var NOISE_PREFIXES = [
 var number = (value) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 var text = (value) => typeof value === "string" ? value : "";
 var time = (value) => typeof value === "number" ? value : null;
+var asRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
 var tokensOf = (raw) => ({
   input: number(raw?.input),
   output: number(raw?.output),
@@ -282,6 +283,83 @@ var deriveDiff = (raw) => {
       truncated: clipped
     };
   });
+};
+var metadataPatches = (part) => {
+  const metadata = asRecord(part.state?.metadata);
+  const files = metadata?.files;
+  if (!Array.isArray(files))
+    return [];
+  return files.flatMap((entry) => {
+    const file = asRecord(entry);
+    if (!file || typeof file.file !== "string")
+      return [];
+    return [{ file: file.file, patch: text(file.patch) }];
+  });
+};
+var editPatch = (input, path) => {
+  const oldString = text(input.oldString);
+  const newString = text(input.newString);
+  if (!oldString && !newString)
+    return "";
+  const oldLines = oldString.split(`
+`).map((line) => `-${line}`);
+  const newLines = newString.split(`
+`).map((line) => `+${line}`);
+  return [`--- a/${path}`, `+++ b/${path}`, "@@ -1 +1 @@", ...oldLines, ...newLines].join(`
+`);
+};
+var deriveTurnDiff = (messages, turnIndex) => {
+  const ordered = orderedMessages(messages);
+  const starts = ordered.map((message, index) => ({ message, index })).filter(({ message }) => message.type === "user" && messageText(message).trim().length > 0).map(({ index }) => index);
+  const start = starts[turnIndex - 1];
+  if (start === undefined)
+    return [];
+  const end = starts[turnIndex] ?? ordered.length;
+  const slice = ordered.slice(start, end);
+  const patches = new Map;
+  const notes = new Map;
+  for (const message of slice) {
+    if (message.type !== "assistant")
+      continue;
+    for (const part of message.content ?? []) {
+      if (!isToolPart(part))
+        continue;
+      const name = text(part.name);
+      const input = asRecord(part.state?.input) ?? {};
+      const fromMetadata = metadataPatches(part);
+      if (fromMetadata.length > 0) {
+        for (const entry of fromMetadata) {
+          if (entry.file)
+            patches.set(entry.file, entry.patch ?? "");
+        }
+        continue;
+      }
+      const path = typeof input.path === "string" ? input.path : typeof input.file_path === "string" ? input.file_path : null;
+      if (!path)
+        continue;
+      if (name === "edit") {
+        const patch = editPatch(input, path);
+        if (patch)
+          patches.set(path, patch);
+        continue;
+      }
+      if (name === "patch" || name === "apply_patch") {
+        const patch = text(input.patch) || text(input.text);
+        if (patch)
+          patches.set(path, patch);
+        continue;
+      }
+      if (name === "write") {
+        if (!patches.has(path))
+          patches.set(path, "");
+        notes.set(path, "write: diff indisponível");
+      }
+    }
+  }
+  return deriveDiff([...patches].map(([file, patch]) => ({ file, patch }))).map((file) => ({
+    ...file,
+    ...notes.has(file.path) ? { note: notes.get(file.path) } : {}
+  }));
 };
 var pathFromPart = (part) => {
   const input = part.state?.input;
@@ -567,15 +645,20 @@ class UpstreamClient {
     this.fetchImpl = fetchImpl;
     this.now = now;
   }
-  async raw(requestPath, query) {
+  async raw(requestPath, query, options) {
     const url = new URL(requestPath, this.baseUrl);
     for (const [key, value] of Object.entries(query ?? {}))
       url.searchParams.set(key, value);
     let response;
     try {
+      const method = options?.method ?? "GET";
       response = await this.fetchImpl(url, {
-        method: "GET",
-        headers: { accept: "application/json" },
+        method,
+        headers: {
+          accept: "application/json",
+          ...method === "POST" ? { "content-type": "application/json" } : {}
+        },
+        ...options?.body !== undefined ? { body: options.body } : {},
         signal: AbortSignal.timeout(5000)
       });
     } catch (error) {
@@ -707,6 +790,20 @@ class UpstreamClient {
     this.activeCache = { value: active, at: current };
     return active;
   }
+  async interrupt(id) {
+    const result = await this.raw(`/api/session/${encodeURIComponent(id)}/interrupt`, undefined, { method: "POST", body: "{}" });
+    return result?.interrupted === true;
+  }
+  async getGitStatus(directory) {
+    return this.raw("/api/git/status", { directory });
+  }
+  async getGitDiff(directory, path2, staged = false) {
+    return this.raw("/api/git/diff", {
+      directory,
+      path: path2,
+      ...staged ? { staged: "true" } : {}
+    });
+  }
   invalidate(sessionId) {
     this.sessionsCache = null;
     this.activeCache = null;
@@ -728,6 +825,8 @@ class UpstreamClient {
 // src/service/app.ts
 var MAX_CHILD_MESSAGES = 12;
 var MESSAGES_FOR_STRIP = 20;
+var GIT_FILE_LIMIT = 100;
+var BODY_LIMIT = 16384;
 var errorOf = (code, message) => ({ code, message });
 var isAuth = (error) => error instanceof UpstreamError && error.code === "auth-required";
 var soft = async (work, fallback) => {
@@ -739,6 +838,28 @@ var soft = async (work, fallback) => {
     return fallback;
   }
 };
+var readBody = (req) => new Promise((resolve, reject) => {
+  let raw = "";
+  req.setEncoding("utf8");
+  req.on("data", (chunk) => {
+    raw += chunk;
+    if (raw.length > BODY_LIMIT) {
+      reject(new UpstreamError("bad-answer", "Corpo da requisição grande demais."));
+      req.destroy();
+    }
+  });
+  req.on("end", () => {
+    if (raw.trim() === "")
+      return resolve({});
+    try {
+      resolve(JSON.parse(raw));
+    } catch {
+      reject(new UpstreamError("bad-answer", "Corpo da requisição inválido."));
+    }
+  });
+  req.on("error", reject);
+});
+var recordOf = (value) => typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
 var createLensService = (config) => {
   const now = config.now ?? Date.now;
   const host = config.host ?? "127.0.0.1";
@@ -833,6 +954,88 @@ var createLensService = (config) => {
       return { data: buildStrip(snapshot), error: null };
     return { data: snapshot, error: null };
   };
+  const gitDiff = async (sessionId) => {
+    const client = await resolveUpstream();
+    const session = await client.getSession(sessionId);
+    const directory = session.location?.directory;
+    if (!directory)
+      throw new UpstreamError("bad-answer", "Sessão sem diretório de projeto.");
+    let status;
+    try {
+      status = await client.getGitStatus(directory);
+    } catch (error) {
+      if (error instanceof UpstreamError && error.code === "upstream-failed" && /400/.test(error.message)) {
+        throw new UpstreamError("not-git", "A sessão atual não está dentro de um repositório Git.");
+      }
+      throw error;
+    }
+    const files = (status.files ?? []).filter((file) => typeof file.path === "string" && file.path.length > 0).slice(0, GIT_FILE_LIMIT);
+    const raw = [];
+    for (const file of files) {
+      const path2 = file.path;
+      const staged = typeof file.index === "string" && ![" ", "?"].includes(file.index);
+      const working = typeof file.working_dir === "string" && ![" ", "?"].includes(file.working_dir);
+      const untracked = file.index === "?" || file.working_dir === "?";
+      const patches = [];
+      if (staged) {
+        const diff = await client.getGitDiff(directory, path2, true).catch((error) => {
+          if (isAuth(error))
+            throw error;
+          return null;
+        });
+        if (diff?.diff)
+          patches.push(diff.diff);
+      }
+      if (working || untracked || !staged) {
+        const diff = await client.getGitDiff(directory, path2).catch((error) => {
+          if (isAuth(error))
+            throw error;
+          return null;
+        });
+        if (diff?.diff)
+          patches.push(diff.diff);
+      }
+      raw.push({ file: path2, patch: patches.join(`
+`) });
+    }
+    return {
+      data: {
+        branch: status.current ?? null,
+        tracking: status.tracking ?? null,
+        ahead: status.ahead ?? 0,
+        behind: status.behind ?? 0,
+        clean: Boolean(status.isClean),
+        files: deriveDiff(raw)
+      },
+      error: null
+    };
+  };
+  const turnDiff = async (sessionId, turn) => {
+    const client = await resolveUpstream();
+    const messages = await client.getConversation(sessionId);
+    return { data: deriveTurnDiff(messages, turn), error: null };
+  };
+  const interrupt = async (req, res) => {
+    const body = recordOf(await readBody(req));
+    const sessionId = typeof body?.sessionId === "string" ? body.sessionId.trim() : "";
+    const parentId = typeof body?.parentId === "string" ? body.parentId.trim() : "";
+    if (!sessionId || !parentId) {
+      send(res, 200, { data: null, error: errorOf("bad-answer", "sessionId e parentId são obrigatórios.") });
+      return;
+    }
+    const client = await resolveUpstream();
+    const session = await client.getSession(sessionId);
+    const sessions = await client.listSessions();
+    const isChild = session.parentID !== null && session.parentID !== undefined;
+    const isDescendant = descendantSessions(parentId, sessions).some((child) => child.id === sessionId);
+    if (!isChild || !isDescendant) {
+      send(res, 200, { data: null, error: errorOf("forbidden", "Só subagentes da sessão atual podem ser interrompidos.") });
+      return;
+    }
+    const interrupted = await client.interrupt(sessionId);
+    client.invalidate(sessionId);
+    send(res, 200, { data: { interrupted }, error: null });
+  };
   const handle = async (req, res) => {
     touch();
     if (req.headers.authorization !== `Bearer ${config.token}`) {
@@ -840,6 +1043,17 @@ var createLensService = (config) => {
       return;
     }
     const url = new URL(req.url ?? "/", `http://${host}`);
+    if (req.method === "POST" && url.pathname === "/interrupt") {
+      try {
+        await interrupt(req, res);
+      } catch (error) {
+        send(res, 200, {
+          data: null,
+          error: error instanceof UpstreamError ? errorOf(error.code, error.message) : errorOf("upstream-failed", "Falha ao interromper.")
+        });
+      }
+      return;
+    }
     if (req.method !== "GET") {
       send(res, 405, { data: null, error: errorOf("bad-answer", "Método não permitido.") });
       return;
@@ -848,7 +1062,8 @@ var createLensService = (config) => {
       send(res, 200, { ok: true });
       return;
     }
-    if (url.pathname !== "/snapshot" && url.pathname !== "/strip") {
+    const supported = new Set(["/snapshot", "/strip", "/git-diff", "/turn-diff"]);
+    if (!supported.has(url.pathname)) {
       send(res, 404, { data: null, error: errorOf("bad-answer", "Rota desconhecida.") });
       return;
     }
@@ -858,6 +1073,19 @@ var createLensService = (config) => {
       return;
     }
     try {
+      if (url.pathname === "/git-diff") {
+        send(res, 200, await gitDiff(sessionId));
+        return;
+      }
+      if (url.pathname === "/turn-diff") {
+        const turn = Number(url.searchParams.get("turn"));
+        if (!Number.isInteger(turn) || turn <= 0) {
+          send(res, 200, { data: null, error: errorOf("bad-answer", "turn inválido.") });
+          return;
+        }
+        send(res, 200, await turnDiff(sessionId, turn));
+        return;
+      }
       const result = await build(sessionId, url.pathname === "/strip");
       send(res, 200, result);
     } catch (error) {

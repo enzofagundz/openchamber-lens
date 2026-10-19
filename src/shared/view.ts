@@ -8,7 +8,7 @@ import {
   truncate,
 } from './format.ts';
 import { strings } from './strings.ts';
-import type { LensSnapshot, LensStrip, LensTurn } from './types.ts';
+import type { LensDiffFile, LensSnapshot, LensStrip, LensTurn } from './types.ts';
 
 export type Tone = 'normal' | 'warning' | 'danger' | 'muted';
 
@@ -55,6 +55,7 @@ export type AgentRow = {
   tokens: string;
   tools: string;
   canOpen: boolean;
+  canStop: boolean;
 };
 
 export type TurnRow = {
@@ -78,6 +79,7 @@ export type DiffRow = {
   deletions: number;
   patch: string;
   truncated: boolean;
+  note?: string;
   tone: Tone;
 };
 
@@ -235,13 +237,14 @@ export const agentRows = (snapshot: LensSnapshot): AgentRow[] =>
       ),
       tools: `${agent.toolCalls}`,
       canOpen: !agent.isMain,
+      canStop: !agent.isMain && agent.status === 'running',
     };
   });
 
 export const turnRows = (snapshot: LensSnapshot): TurnRow[] => snapshot.turns.map(turnRow);
 
-export const diffRows = (snapshot: LensSnapshot): DiffRow[] =>
-  snapshot.diff.map((file) => ({
+export const diffRowsFromFiles = (files: LensDiffFile[]): DiffRow[] =>
+  files.map((file) => ({
     path: shortPath(file.path, 52),
     fullPath: file.path,
     status:
@@ -256,8 +259,11 @@ export const diffRows = (snapshot: LensSnapshot): DiffRow[] =>
     deletions: file.deletions,
     patch: file.patch,
     truncated: file.truncated,
+    ...(file.note ? { note: file.note } : {}),
     tone: file.status === 'deleted' ? 'danger' : file.status === 'added' ? 'normal' : 'muted',
   }));
+
+export const diffRows = (snapshot: LensSnapshot): DiffRow[] => diffRowsFromFiles(snapshot.diff);
 
 export const stripModel = (strip: LensStrip): StripModel => ({
   context: formatPercent(strip.contextPercent),

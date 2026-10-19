@@ -1,6 +1,6 @@
 import { HostRequestError, type HostClient } from '@openchamber/sdk';
 
-import type { LensError, SnapshotResponse, StripResponse } from '../shared/types.ts';
+import type { LensDiffFile, LensError, LensGitDiff, SnapshotResponse, StripResponse } from '../shared/types.ts';
 
 export type Failure = LensError;
 
@@ -63,6 +63,56 @@ export const requestStrip = async (
       method: 'GET',
       path: '/strip',
       query: { sessionId },
+    });
+    return parse(result.body);
+  } catch (error) {
+    return { data: null, error: failureOf(error) };
+  }
+};
+
+export const requestGitDiff = async (
+  host: HostClient,
+  sessionId: string,
+): Promise<{ data: LensGitDiff | null; error: Failure | null }> => {
+  try {
+    const result = await host.serviceRequest({
+      method: 'GET',
+      path: '/git-diff',
+      query: { sessionId },
+    });
+    return parse(result.body);
+  } catch (error) {
+    return { data: null, error: failureOf(error) };
+  }
+};
+
+export const requestTurnDiff = async (
+  host: HostClient,
+  sessionId: string,
+  turn: number,
+): Promise<{ data: LensDiffFile[] | null; error: Failure | null }> => {
+  try {
+    const result = await host.serviceRequest({
+      method: 'GET',
+      path: '/turn-diff',
+      query: { sessionId, turn: String(turn) },
+    });
+    return parse(result.body);
+  } catch (error) {
+    return { data: null, error: failureOf(error) };
+  }
+};
+
+export const requestInterrupt = async (
+  host: HostClient,
+  sessionId: string,
+  parentId: string,
+): Promise<{ data: { interrupted: boolean } | null; error: Failure | null }> => {
+  try {
+    const result = await host.serviceRequest({
+      method: 'POST',
+      path: '/interrupt',
+      body: JSON.stringify({ sessionId, parentId }),
     });
     return parse(result.body);
   } catch (error) {

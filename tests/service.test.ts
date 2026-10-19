@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createLensService, type LensService } from '../src/service/app.ts';
-import type { LensSnapshot, LensStrip } from '../src/shared/types.ts';
+import type { LensDiffFile, LensGitDiff, LensSnapshot, LensStrip } from '../src/shared/types.ts';
 import {
   active,
   childMessages,
@@ -23,6 +23,7 @@ type FakeUpstream = {
   url: string;
   server: Server;
   eventReady: Promise<void>;
+  interrupts: string[];
   setToolStatus: (status: string) => void;
   emit: (event: unknown) => void;
   close: () => Promise<void>;
@@ -40,6 +41,7 @@ const createFakeUpstream = async (options: { auth?: boolean; partial?: boolean }
   let toolStatus = 'running';
   let eventResponse: ServerResponse | null = null;
   let readyResolve: (() => void) | null = null;
+  const interrupts: string[] = [];
   const eventReady = new Promise<void>((resolve) => {
     readyResolve = resolve;
   });
@@ -82,6 +84,13 @@ const createFakeUpstream = async (options: { auth?: boolean; partial?: boolean }
       return;
     }
 
+    if (req.method === 'POST' && url.pathname.startsWith('/api/session/') && url.pathname.endsWith('/interrupt')) {
+      const id = decodeURIComponent(url.pathname.slice('/api/session/'.length, -'/interrupt'.length));
+      interrupts.push(id);
+      json(res, { interrupted: id === 'ses_child' });
+      return;
+    }
+
     if (url.pathname === '/api/session/active') {
       json(res, { data: active });
       return;
@@ -92,6 +101,14 @@ const createFakeUpstream = async (options: { auth?: boolean; partial?: boolean }
     }
     if (url.pathname === '/api/session/ses_root') {
       json(res, { data: rootSession });
+      return;
+    }
+    if (url.pathname === '/api/session/ses_child') {
+      json(res, { data: childSession });
+      return;
+    }
+    if (url.pathname === '/api/session/ses_grand') {
+      json(res, { data: grandchildSession });
       return;
     }
     if (url.pathname === '/api/session/ses_root/message') {
@@ -124,6 +141,37 @@ const createFakeUpstream = async (options: { auth?: boolean; partial?: boolean }
       json(res, { data: models });
       return;
     }
+    if (url.pathname === '/api/git/status') {
+      json(res, {
+        current: 'main',
+        tracking: 'origin/main',
+        ahead: 1,
+        behind: 0,
+        isClean: false,
+        files: [
+          { path: 'src/a.ts', index: ' ', working_dir: 'M' },
+          { path: 'c.ts', index: '?', working_dir: '?' },
+          { path: 'd.ts', index: 'M', working_dir: ' ' },
+        ],
+      });
+      return;
+    }
+    if (url.pathname === '/api/git/diff') {
+      const path = url.searchParams.get('path') ?? '';
+      const staged = url.searchParams.get('staged') === 'true';
+      json(res, {
+        diff:
+          path === 'd.ts'
+            ? staged
+              ? 'diff --git a/d.ts b/d.ts\nnew file mode 100644\n--- /dev/null\n+++ b/d.ts\n@@ -0,0 +1 @@\n+staged\n'
+              : ''
+            : path === 'c.ts'
+              ? 'diff --git a/c.ts b/c.ts\nnew file mode 100644\n--- /dev/null\n+++ b/c.ts\n@@ -0,0 +1 @@\n+new\n'
+              : 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+        submodule: null,
+      });
+      return;
+    }
 
     json(res, { error: 'not found' }, 404);
   });
@@ -134,6 +182,7 @@ const createFakeUpstream = async (options: { auth?: boolean; partial?: boolean }
     url,
     server,
     eventReady,
+    interrupts,
     setToolStatus: (status) => {
       toolStatus = status;
     },
@@ -292,5 +341,61 @@ describe('Lens service', () => {
     expect(result.error).toBeNull();
     expect(result.data?.session.context.limit).toBeNull();
     expect(result.data?.session.context.percent).toBeNull();
+  });
+
+  test('interrupts a subagent of the current session', async () => {
+    const upstream = await createFakeUpstream();
+    upstreams.push(upstream);
+    const { base } = await startService({ baseUrl: upstream.url });
+
+    const response = await fetch(`${base}/interrupt`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'ses_child', parentId: 'ses_root' }),
+    });
+    const body = (await response.json()) as { data?: { interrupted: boolean }; error?: { code: string } | null };
+    expect(body.error).toBeNull();
+    expect(body.data?.interrupted).toBe(true);
+    expect(upstream.interrupts).toEqual(['ses_child']);
+  });
+
+  test('refuses to interrupt the main conversation', async () => {
+    const upstream = await createFakeUpstream();
+    upstreams.push(upstream);
+    const { base } = await startService({ baseUrl: upstream.url });
+
+    const response = await fetch(`${base}/interrupt`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'ses_root', parentId: 'ses_root' }),
+    });
+    const body = (await response.json()) as { data?: unknown; error?: { code: string } };
+    expect(body.data).toBeNull();
+    expect(body.error?.code).toBe('forbidden');
+    expect(upstream.interrupts).toEqual([]);
+  });
+
+  test('serves the git working-tree diff', async () => {
+    const upstream = await createFakeUpstream();
+    upstreams.push(upstream);
+    const { base } = await startService({ baseUrl: upstream.url });
+
+    const result = await getJson<LensGitDiff>(base, '/git-diff?sessionId=ses_root');
+    expect(result.error).toBeNull();
+    expect(result.data?.branch).toBe('main');
+    expect(result.data?.ahead).toBe(1);
+    expect(result.data?.files.map((file) => file.path)).toEqual(['src/a.ts', 'c.ts', 'd.ts']);
+    expect(result.data?.files.find((file) => file.path === 'd.ts')?.patch).toContain('+staged');
+  });
+
+  test('serves the diff for one turn', async () => {
+    const upstream = await createFakeUpstream();
+    upstreams.push(upstream);
+    const { base } = await startService({ baseUrl: upstream.url });
+
+    const result = await getJson<LensDiffFile[]>(base, '/turn-diff?sessionId=ses_root&turn=1');
+    expect(result.error).toBeNull();
+    expect(result.data?.map((file) => file.path)).toContain('/projeto/a.ts');
+    expect(result.data?.[0]?.additions).toBe(1);
   });
 });

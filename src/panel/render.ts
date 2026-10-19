@@ -16,6 +16,17 @@ import {
 import { el } from './dom.ts';
 
 export type PanelTab = 'overview' | 'agents' | 'turns' | 'diffs';
+export type DiffSource = 'session' | 'turn' | 'git';
+
+export type DiffView = {
+  source: DiffSource;
+  rows: DiffRow[] | null;
+  selectedTurn: number;
+  turnOptions: Array<{ index: number; label: string }>;
+  meta: string;
+  loading: boolean;
+  error: string | null;
+};
 
 export type PanelProps = {
   snapshot: LensSnapshot | null;
@@ -24,8 +35,14 @@ export type PanelProps = {
   tab: PanelTab;
   expandedTurns: ReadonlySet<number>;
   expandedDiffs: ReadonlySet<string>;
+  diffView: DiffView;
+  stoppingAgents: ReadonlySet<string>;
+  confirmingStop: string | null;
   onTab: (tab: PanelTab) => void;
+  onDiffSource: (source: DiffSource) => void;
+  onSelectTurn: (turn: number) => void;
   onOpenAgent: (id: string) => void;
+  onStopAgent: (id: string) => void;
   onToggleTurn: (index: number) => void;
   onToggleDiff: (path: string) => void;
 };
@@ -260,6 +277,22 @@ const agentCard = (row: AgentRow, props: PanelProps): HTMLElement => {
   const body = el('div', 'agent-body', [head, meta, figures]);
   card.append(avatar, body);
 
+  if (row.canStop) {
+    const stop = el('button', 'agent-stop');
+    stop.type = 'button';
+    stop.textContent = props.stoppingAgents.has(row.id)
+      ? strings.labels.stopping
+      : props.confirmingStop === row.id
+        ? strings.labels.stopConfirm
+        : strings.labels.stop;
+    stop.disabled = props.stoppingAgents.has(row.id);
+    stop.addEventListener('click', (event) => {
+      event.stopPropagation();
+      props.onStopAgent(row.id);
+    });
+    card.append(stop);
+  }
+
   if (row.canOpen) {
     const open = el('button', 'agent-open', undefined, strings.labels.open);
     open.type = 'button';
@@ -395,6 +428,7 @@ const diffCard = (row: DiffRow, props: PanelProps): HTMLElement => {
   card.append(head);
 
   if (open) {
+    if (row.note) card.append(el('div', 'diff-note', undefined, row.note));
     card.append(patchLines(row.patch));
     if (row.truncated) card.append(el('div', 'truncated', undefined, strings.labels.patchTruncated));
   }
@@ -402,12 +436,54 @@ const diffCard = (row: DiffRow, props: PanelProps): HTMLElement => {
 };
 
 const diffs = (snapshot: LensSnapshot, props: PanelProps): HTMLElement => {
-  const rows = diffRows(snapshot);
-  const content =
-    rows.length === 0
-      ? empty(strings.empty.noDiff)
-      : el('div', undefined, rows.map((row) => diffCard(row, props)));
-  return section(1, strings.sections.diffs, content, rows.length);
+  const view = props.diffView;
+  const rows = view.rows ?? diffRows(snapshot);
+  const tools = el('div', 'diff-tools');
+
+  const source = el('div', 'diff-source');
+  for (const [id, label] of [
+    ['session', 'Sessão'],
+    ['turn', 'Turno'],
+    ['git', 'Git'],
+  ] as const) {
+    const button = el('button', `diff-source-item ${view.source === id ? 'active' : ''}`, undefined, label);
+    button.type = 'button';
+    button.setAttribute('aria-pressed', String(view.source === id));
+    button.addEventListener('click', () => props.onDiffSource(id));
+    source.append(button);
+  }
+  tools.append(source);
+
+  if (view.source === 'turn' && view.turnOptions.length > 0) {
+    const select = el('select', 'diff-turn-select');
+    select.setAttribute('aria-label', 'Turno');
+    for (const option of view.turnOptions) {
+      const node = el('option', undefined, undefined, option.label);
+      node.value = String(option.index);
+      node.selected = option.index === view.selectedTurn;
+      select.append(node);
+    }
+    select.addEventListener('change', () => props.onSelectTurn(Number(select.value)));
+    tools.append(select);
+  }
+
+  tools.append(el('span', 'diff-meta', view.meta));
+
+  let content: HTMLElement;
+  if (view.loading) {
+    content = empty('Lendo diff…');
+  } else if (view.error) {
+    content = el('div', 'banner error', [
+      el('div', 'banner-title', undefined, 'Falha ao ler o diff'),
+      el('div', 'banner-body', undefined, view.error),
+    ]);
+  } else if (rows.length === 0) {
+    content = empty(strings.empty.noDiff);
+  } else {
+    content = el('div', undefined, rows.map((row) => diffCard(row, props)));
+  }
+
+  return el('div', undefined, [tools, section(1, strings.sections.diffs, content, rows.length)]);
 };
 
 const errorBanner = (props: PanelProps): HTMLElement | null => {

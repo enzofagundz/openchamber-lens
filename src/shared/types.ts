@@ -7,7 +7,9 @@ export type LensErrorCode =
   | 'needs-approval'
   | 'paused'
   | 'service-failed'
-  | 'unreachable';
+  | 'unreachable'
+  | 'forbidden'
+  | 'not-git';
 
 export type LensError = {
   code: LensErrorCode;
@@ -62,6 +64,16 @@ export type LensDiffFile = {
   deletions: number;
   patch: string;
   truncated: boolean;
+  note?: string;
+};
+
+export type LensGitDiff = {
+  branch: string | null;
+  tracking: string | null;
+  ahead: number;
+  behind: number;
+  clean: boolean;
+  files: LensDiffFile[];
 };
 
 export type LensRecentFile = {
@@ -200,6 +212,26 @@ export type RawMessage = {
 export type RawDiff = {
   file?: string;
   patch?: string;
+};
+
+export type RawGitFile = {
+  path?: string;
+  index?: string;
+  working_dir?: string;
+};
+
+export type RawGitStatus = {
+  current?: string | null;
+  tracking?: string | null;
+  ahead?: number;
+  behind?: number;
+  files?: RawGitFile[];
+  isClean?: boolean;
+};
+
+export type RawGitDiff = {
+  diff?: string;
+  submodule?: unknown;
 };
 
 export type RawModel = {

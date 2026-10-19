@@ -40,6 +40,9 @@ export const strings = {
     agentTree: 'Quem chamou quem',
     openSession: 'Abrir sessão',
     open: 'Abrir',
+    stop: 'Parar',
+    stopConfirm: 'Confirmar?',
+    stopping: 'Parando…',
     parent: 'pai',
     start: 'Início',
     patchTruncated: 'Patch truncado para manter o painel rápido.',
@@ -95,6 +98,14 @@ export const strings = {
     unreachable: {
       title: 'Serviço local inacessível',
       body: 'Não foi possível falar com o serviço do Lens.',
+    },
+    forbidden: {
+      title: 'Ação não permitida',
+      body: 'O Lens só interrompe subagentes da sessão atual.',
+    },
+    'not-git': {
+      title: 'Diretório sem Git',
+      body: 'A sessão atual não está dentro de um repositório Git.',
     },
   },
 } as const;

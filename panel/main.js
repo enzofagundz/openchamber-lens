@@ -1722,53 +1722,6 @@ ${tone("success")}${tone("warning")}${tone("error")}${tone("info")}
 ${GUEST_SCROLLBAR_CSS}
 ${UI_SIZE_CSS}
 ${GUEST_UI_LOOK_CSS}`;
-  // src/panel/client.ts
-  var failureOf = (error) => {
-    if (error instanceof HostRequestError) {
-      switch (error.code) {
-        case "NO_SERVICE":
-        case "NOT_GRANTED":
-          return { code: "needs-approval", message: error.message };
-        case "DISABLED":
-          return { code: "paused", message: error.message };
-        case "SERVICE_FAILED":
-          return { code: "service-failed", message: error.message };
-        case "HOST_UNAVAILABLE":
-        case "HOST_TIMEOUT":
-        case "DISCONNECTED":
-          return { code: "unreachable", message: error.message };
-        default:
-          return { code: "unreachable", message: error.message };
-      }
-    }
-    return { code: "unreachable", message: error instanceof Error ? error.message : "Falha inesperada." };
-  };
-  var parse = (body) => {
-    try {
-      const parsed = JSON.parse(body);
-      if (parsed.error)
-        return { data: null, error: parsed.error };
-      if (parsed.data === null || parsed.data === undefined) {
-        return { data: null, error: { code: "bad-answer", message: "Resposta sem dados." } };
-      }
-      return { data: parsed.data, error: null };
-    } catch {
-      return { data: null, error: { code: "bad-answer", message: "Resposta não é JSON." } };
-    }
-  };
-  var requestSnapshot = async (host, sessionId) => {
-    try {
-      const result = await host.serviceRequest({
-        method: "GET",
-        path: "/snapshot",
-        query: { sessionId }
-      });
-      return parse(result.body);
-    } catch (error) {
-      return { data: null, error: failureOf(error) };
-    }
-  };
-
   // src/shared/format.ts
   var formatTokens = (value) => {
     if (value === null || value === undefined || !Number.isFinite(value))
@@ -1879,6 +1832,9 @@ ${GUEST_UI_LOOK_CSS}`;
       agentTree: "Quem chamou quem",
       openSession: "Abrir sessão",
       open: "Abrir",
+      stop: "Parar",
+      stopConfirm: "Confirmar?",
+      stopping: "Parando…",
       parent: "pai",
       start: "Início",
       patchTruncated: "Patch truncado para manter o painel rápido.",
@@ -1934,6 +1890,14 @@ ${GUEST_UI_LOOK_CSS}`;
       unreachable: {
         title: "Serviço local inacessível",
         body: "Não foi possível falar com o serviço do Lens."
+      },
+      forbidden: {
+        title: "Ação não permitida",
+        body: "O Lens só interrompe subagentes da sessão atual."
+      },
+      "not-git": {
+        title: "Diretório sem Git",
+        body: "A sessão atual não está dentro de um repositório Git."
       }
     }
   };
@@ -2073,11 +2037,12 @@ ${GUEST_UI_LOOK_CSS}`;
       cost: formatUsd(agent.cost),
       tokens: formatTokens(agent.tokens.input + agent.tokens.output + agent.tokens.reasoning + agent.tokens.cacheRead),
       tools: `${agent.toolCalls}`,
-      canOpen: !agent.isMain
+      canOpen: !agent.isMain,
+      canStop: !agent.isMain && agent.status === "running"
     };
   });
   var turnRows = (snapshot) => snapshot.turns.map(turnRow);
-  var diffRows = (snapshot) => snapshot.diff.map((file) => ({
+  var diffRowsFromFiles = (files) => files.map((file) => ({
     path: shortPath(file.path, 52),
     fullPath: file.path,
     status: file.status === "added" ? "novo" : file.status === "deleted" ? "apagado" : file.status === "modified" ? "alterado" : "—",
@@ -2085,8 +2050,93 @@ ${GUEST_UI_LOOK_CSS}`;
     deletions: file.deletions,
     patch: file.patch,
     truncated: file.truncated,
+    ...file.note ? { note: file.note } : {},
     tone: file.status === "deleted" ? "danger" : file.status === "added" ? "normal" : "muted"
   }));
+  var diffRows = (snapshot) => diffRowsFromFiles(snapshot.diff);
+
+  // src/panel/client.ts
+  var failureOf = (error) => {
+    if (error instanceof HostRequestError) {
+      switch (error.code) {
+        case "NO_SERVICE":
+        case "NOT_GRANTED":
+          return { code: "needs-approval", message: error.message };
+        case "DISABLED":
+          return { code: "paused", message: error.message };
+        case "SERVICE_FAILED":
+          return { code: "service-failed", message: error.message };
+        case "HOST_UNAVAILABLE":
+        case "HOST_TIMEOUT":
+        case "DISCONNECTED":
+          return { code: "unreachable", message: error.message };
+        default:
+          return { code: "unreachable", message: error.message };
+      }
+    }
+    return { code: "unreachable", message: error instanceof Error ? error.message : "Falha inesperada." };
+  };
+  var parse = (body) => {
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed.error)
+        return { data: null, error: parsed.error };
+      if (parsed.data === null || parsed.data === undefined) {
+        return { data: null, error: { code: "bad-answer", message: "Resposta sem dados." } };
+      }
+      return { data: parsed.data, error: null };
+    } catch {
+      return { data: null, error: { code: "bad-answer", message: "Resposta não é JSON." } };
+    }
+  };
+  var requestSnapshot = async (host, sessionId) => {
+    try {
+      const result = await host.serviceRequest({
+        method: "GET",
+        path: "/snapshot",
+        query: { sessionId }
+      });
+      return parse(result.body);
+    } catch (error) {
+      return { data: null, error: failureOf(error) };
+    }
+  };
+  var requestGitDiff = async (host, sessionId) => {
+    try {
+      const result = await host.serviceRequest({
+        method: "GET",
+        path: "/git-diff",
+        query: { sessionId }
+      });
+      return parse(result.body);
+    } catch (error) {
+      return { data: null, error: failureOf(error) };
+    }
+  };
+  var requestTurnDiff = async (host, sessionId, turn) => {
+    try {
+      const result = await host.serviceRequest({
+        method: "GET",
+        path: "/turn-diff",
+        query: { sessionId, turn: String(turn) }
+      });
+      return parse(result.body);
+    } catch (error) {
+      return { data: null, error: failureOf(error) };
+    }
+  };
+  var requestInterrupt = async (host, sessionId, parentId) => {
+    try {
+      const result = await host.serviceRequest({
+        method: "POST",
+        path: "/interrupt",
+        body: JSON.stringify({ sessionId, parentId })
+      });
+      return parse(result.body);
+    } catch (error) {
+      return { data: null, error: failureOf(error) };
+    }
+  };
 
   // src/panel/dom.ts
   var el2 = (tag, className, children, text) => {
@@ -2295,6 +2345,17 @@ ${GUEST_UI_LOOK_CSS}`;
     ]);
     const body = el2("div", "agent-body", [head, meta, figures]);
     card.append(avatar, body);
+    if (row.canStop) {
+      const stop = el2("button", "agent-stop");
+      stop.type = "button";
+      stop.textContent = props.stoppingAgents.has(row.id) ? strings.labels.stopping : props.confirmingStop === row.id ? strings.labels.stopConfirm : strings.labels.stop;
+      stop.disabled = props.stoppingAgents.has(row.id);
+      stop.addEventListener("click", (event) => {
+        event.stopPropagation();
+        props.onStopAgent(row.id);
+      });
+      card.append(stop);
+    }
     if (row.canOpen) {
       const open = el2("button", "agent-open", undefined, strings.labels.open);
       open.type = "button";
@@ -2391,6 +2452,8 @@ ${GUEST_UI_LOOK_CSS}`;
     head.addEventListener("click", () => props.onToggleDiff(row.fullPath));
     card.append(head);
     if (open) {
+      if (row.note)
+        card.append(el2("div", "diff-note", undefined, row.note));
       card.append(patchLines(row.patch));
       if (row.truncated)
         card.append(el2("div", "truncated", undefined, strings.labels.patchTruncated));
@@ -2398,9 +2461,49 @@ ${GUEST_UI_LOOK_CSS}`;
     return card;
   };
   var diffs = (snapshot, props) => {
-    const rows = diffRows(snapshot);
-    const content = rows.length === 0 ? empty(strings.empty.noDiff) : el2("div", undefined, rows.map((row) => diffCard(row, props)));
-    return section(1, strings.sections.diffs, content, rows.length);
+    const view = props.diffView;
+    const rows = view.rows ?? diffRows(snapshot);
+    const tools = el2("div", "diff-tools");
+    const source = el2("div", "diff-source");
+    for (const [id, label] of [
+      ["session", "Sessão"],
+      ["turn", "Turno"],
+      ["git", "Git"]
+    ]) {
+      const button2 = el2("button", `diff-source-item ${view.source === id ? "active" : ""}`, undefined, label);
+      button2.type = "button";
+      button2.setAttribute("aria-pressed", String(view.source === id));
+      button2.addEventListener("click", () => props.onDiffSource(id));
+      source.append(button2);
+    }
+    tools.append(source);
+    if (view.source === "turn" && view.turnOptions.length > 0) {
+      const select = el2("select", "diff-turn-select");
+      select.setAttribute("aria-label", "Turno");
+      for (const option of view.turnOptions) {
+        const node = el2("option", undefined, undefined, option.label);
+        node.value = String(option.index);
+        node.selected = option.index === view.selectedTurn;
+        select.append(node);
+      }
+      select.addEventListener("change", () => props.onSelectTurn(Number(select.value)));
+      tools.append(select);
+    }
+    tools.append(el2("span", "diff-meta", view.meta));
+    let content;
+    if (view.loading) {
+      content = empty("Lendo diff…");
+    } else if (view.error) {
+      content = el2("div", "banner error", [
+        el2("div", "banner-title", undefined, "Falha ao ler o diff"),
+        el2("div", "banner-body", undefined, view.error)
+      ]);
+    } else if (rows.length === 0) {
+      content = empty(strings.empty.noDiff);
+    } else {
+      content = el2("div", undefined, rows.map((row) => diffCard(row, props)));
+    }
+    return el2("div", undefined, [tools, section(1, strings.sections.diffs, content, rows.length)]);
   };
   var errorBanner = (props) => {
     if (!props.error)
@@ -2757,6 +2860,20 @@ html, body {
   cursor: pointer;
 }
 .agent-open:hover { color: var(--lens-text); border-color: var(--lens-accent); }
+.agent-stop {
+  align-self: center;
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--lens-danger) 40%, var(--lens-border));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--lens-danger-text);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.agent-stop:hover { background: color-mix(in srgb, var(--lens-danger) 10%, transparent); }
+.agent-stop:disabled { opacity: .65; cursor: default; }
 
 .turn-card { border: 1px solid var(--lens-border); border-radius: var(--lens-radius); background: var(--lens-surface); margin-bottom: 6px; overflow: hidden; }
 .turn-card:last-child { margin-bottom: 0; }
@@ -2799,8 +2916,31 @@ html, body {
 .detail-value { margin-top: 2px; color: var(--lens-text); font-size: 11px; overflow-wrap: anywhere; }
 .detail-full { grid-column: 1 / -1; }
 
-.diff-card { border: 1px solid var(--lens-border); border-radius: var(--lens-radius); background: var(--lens-surface); margin-bottom: 6px; overflow: hidden; }
-.diff-card:last-child { margin-bottom: 0; }
+.diff-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.diff-source { display: inline-flex; padding: 2px; border: 1px solid var(--lens-border); border-radius: 999px; background: var(--lens-surface); }
+.diff-source button {
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--lens-muted);
+  font: inherit;
+  font-size: 10px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.diff-source button.active { background: var(--lens-accent); color: var(--lens-accent-fg); }
+.diff-turn-select {
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid var(--lens-border);
+  border-radius: 6px;
+  background: var(--lens-surface);
+  color: var(--lens-text);
+  font: inherit;
+  font-size: 10px;
+}
+.diff-meta { margin-left: auto; color: var(--lens-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.diff-card { border: 1px solid var(--lens-border); border-radius: var(--lens-radius); background: var(--lens-surface); margin-bottom: 6px; overflow: hidden; }.diff-card:last-child { margin-bottom: 0; }
 .diff-head {
   display: flex;
   align-items: center;
@@ -2863,6 +3003,7 @@ html, body {
 .patch-line.hunk { background: var(--lens-surface-2); color: var(--lens-muted); }
 .patch-line.meta { color: var(--lens-muted); }
 .truncated { padding: 5px 10px 8px; color: var(--lens-warn-text); font-size: 10px; }
+.diff-note { padding: 6px 10px 2px; color: var(--lens-muted); font-size: 10px; }
 
 .banner {
   padding: 9px 11px;
@@ -2962,7 +3103,9 @@ html, body {
 .strip-empty { color: var(--lens-muted); font-size: 10px; }
 .strip-error { color: var(--lens-danger-text); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 340px) {
-  .strip-pills { gap: 3px 6px; }
+  .strip-pills { gap: 3px 5px; }
+  .strip-pill .label { font-size: 8px; letter-spacing: 0.04em; }
+  .strip-pill .value { font-size: 11px; }
   .strip-model { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -2984,9 +3127,76 @@ html, body {
   var error = null;
   var tab = "overview";
   var inFlight = false;
+  var diffSource = "session";
+  var selectedTurn = 0;
+  var diffRowsState = null;
+  var diffMeta = "";
+  var diffLoading = false;
+  var diffError = null;
+  var diffRequest = 0;
+  var confirmingStop = null;
+  var confirmTimer = null;
+  var stoppingAgents = new Set;
   var expandedTurns = new Set;
   var expandedDiffs = new Set;
   var visible = () => !document.hidden && root.getBoundingClientRect().width > 0;
+  var turnOptions = () => (snapshot?.turns ?? []).map((turn) => ({
+    index: turn.index,
+    label: `#${turn.index} ${truncate(turn.request, 28)}`
+  }));
+  var diffView = () => ({
+    source: diffSource,
+    rows: diffSource === "session" ? null : diffRowsState ?? [],
+    selectedTurn,
+    turnOptions: turnOptions(),
+    meta: diffMeta || (diffSource === "session" && snapshot ? `${snapshot.diff.length} arquivos` : ""),
+    loading: diffLoading,
+    error: diffError
+  });
+  var clearConfirm = () => {
+    if (confirmTimer)
+      clearTimeout(confirmTimer);
+    confirmTimer = null;
+    confirmingStop = null;
+  };
+  var askStop = (id) => {
+    if (stoppingAgents.has(id))
+      return;
+    if (confirmingStop !== id) {
+      clearConfirm();
+      confirmingStop = id;
+      render();
+      confirmTimer = setTimeout(() => {
+        confirmingStop = null;
+        confirmTimer = null;
+        render();
+      }, 4000);
+      return;
+    }
+    stopAgent(id);
+  };
+  var stopAgent = async (id) => {
+    if (!sessionId)
+      return;
+    clearConfirm();
+    stoppingAgents.add(id);
+    render();
+    try {
+      const result = await requestInterrupt(host, id, sessionId);
+      if (result.data) {
+        await host.toast({
+          kind: result.data.interrupted ? "info" : "success",
+          message: result.data.interrupted ? "Pedido de parada enviado." : "O agente já não estava rodando."
+        });
+      } else {
+        await host.toast({ kind: "error", message: result.error?.message ?? "Não foi possível parar o agente." });
+      }
+    } finally {
+      stoppingAgents.delete(id);
+      render();
+      poll();
+    }
+  };
   var render = () => {
     if (!mounted)
       return;
@@ -2997,16 +3207,42 @@ html, body {
       tab,
       expandedTurns,
       expandedDiffs,
+      diffView: diffView(),
+      stoppingAgents,
+      confirmingStop,
       onTab: (next) => {
         tab = next;
         render();
-        poll();
+        if (next === "diffs" && diffSource !== "session")
+          loadDiff();
+        else
+          poll();
+      },
+      onDiffSource: (next) => {
+        diffRequest += 1;
+        diffSource = next;
+        diffRowsState = null;
+        diffMeta = "";
+        diffError = null;
+        diffLoading = false;
+        if (next === "turn" && selectedTurn === 0) {
+          selectedTurn = snapshot?.turns.at(-1)?.index ?? 0;
+        }
+        render();
+        if (next !== "session")
+          loadDiff();
+      },
+      onSelectTurn: (index) => {
+        selectedTurn = index;
+        render();
+        loadDiff();
       },
       onOpenAgent: (id) => {
         host.openSession(id).catch(() => {
           return;
         });
       },
+      onStopAgent: askStop,
       onToggleTurn: (index) => {
         if (expandedTurns.has(index))
           expandedTurns.delete(index);
@@ -3028,6 +3264,15 @@ html, body {
     error = null;
     expandedTurns.clear();
     expandedDiffs.clear();
+    diffSource = "session";
+    selectedTurn = 0;
+    diffRowsState = null;
+    diffMeta = "";
+    diffLoading = false;
+    diffError = null;
+    diffRequest += 1;
+    stoppingAgents.clear();
+    clearConfirm();
     render();
   };
   var poll = async () => {
@@ -3042,12 +3287,62 @@ html, body {
       if (result.data) {
         snapshot = result.data;
         error = null;
+        if (selectedTurn === 0 && snapshot.turns.length > 0) {
+          selectedTurn = snapshot.turns[snapshot.turns.length - 1].index;
+        }
       } else {
         error = result.error ?? { code: "bad-answer", message: "Sem dados do serviço." };
       }
       render();
     } finally {
       inFlight = false;
+    }
+  };
+  var loadDiff = async () => {
+    if (!sessionId || diffSource === "session") {
+      diffLoading = false;
+      render();
+      return;
+    }
+    const wanted = sessionId;
+    const request = ++diffRequest;
+    diffLoading = true;
+    diffError = null;
+    render();
+    try {
+      if (diffSource === "git") {
+        const result = await requestGitDiff(host, wanted);
+        if (request !== diffRequest || sessionId !== wanted)
+          return;
+        if (result.data) {
+          diffRowsState = diffRowsFromFiles(result.data.files);
+          const branch = result.data.branch ?? "—";
+          const tracking = result.data.tracking ? ` → ${result.data.tracking}` : "";
+          const travel = result.data.ahead || result.data.behind ? ` · ${result.data.ahead}↑ ${result.data.behind}↓` : "";
+          diffMeta = `${branch}${tracking}${travel}`;
+        } else {
+          diffRowsState = [];
+          diffError = result.error?.message ?? "Não foi possível ler o Git.";
+        }
+      } else {
+        const turn = selectedTurn || snapshot?.turns.at(-1)?.index || 1;
+        selectedTurn = turn;
+        const result = await requestTurnDiff(host, wanted, turn);
+        if (request !== diffRequest || sessionId !== wanted)
+          return;
+        if (result.data) {
+          diffRowsState = diffRowsFromFiles(result.data);
+          diffMeta = `#${turn} · ${result.data.length} arquivos`;
+        } else {
+          diffRowsState = [];
+          diffError = result.error?.message ?? "Não foi possível ler o turno.";
+        }
+      }
+    } finally {
+      if (request === diffRequest) {
+        diffLoading = false;
+        render();
+      }
     }
   };
   var setSession = (next) => {

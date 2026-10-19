@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { buildSnapshot, buildStrip } from '../src/shared/derive.ts';
 import { formatAge, formatDuration, formatPercent, formatTokens, formatUsd } from '../src/shared/format.ts';
-import { agentRows, diffRows, overviewModel, stripModel, tabCounts, turnRows } from '../src/shared/view.ts';
+import { agentRows, diffRows, diffRowsFromFiles, overviewModel, stripModel, tabCounts, turnRows } from '../src/shared/view.ts';
 import { errorText, strings } from '../src/shared/strings.ts';
 import { active, childMessages, childSession, diff, grandchildSession, models, rootMessages, rootSession } from './fixtures.ts';
 
@@ -64,6 +64,9 @@ describe('view models', () => {
     expect(rows[1]?.status).toBe('rodando');
     expect(rows[1]?.parentTitle).toBe('Sessão de teste');
     expect(rows[2]?.parentTitle).toBe('Investigar');
+    expect(rows[1]?.canStop).toBe(true);
+    expect(rows[0]?.canStop).toBe(false);
+    expect(rows[2]?.canStop).toBe(false);
   });
 
   test('turn rows keep metadata as separate items', () => {
@@ -83,6 +86,20 @@ describe('view models', () => {
     expect(rows.map((row) => row.status)).toEqual(['alterado', 'novo', 'apagado']);
     expect(rows[0]?.additions).toBe(2);
     expect(rows[0]?.deletions).toBe(1);
+  });
+
+  test('diff rows can be built from an arbitrary file list', () => {
+    const rows = diffRowsFromFiles([
+      {
+        path: 'src/a.ts',
+        status: 'modified',
+        additions: 2,
+        deletions: 1,
+        patch: '+a',
+        truncated: false,
+      },
+    ]);
+    expect(rows[0]).toMatchObject({ fullPath: 'src/a.ts', status: 'alterado', additions: 2, deletions: 1 });
   });
 
   test('strip is compact', () => {
